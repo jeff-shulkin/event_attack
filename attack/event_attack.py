@@ -219,7 +219,7 @@ class EventAttack:
 
         glDisable(GL_TEXTURE_2D)
 
-    def flicker(self, video_path=None, camera_id=None):
+    def flicker(self, duration=60, quit_key="ESC"):
         # Generate the positive and negative frames to flicker between
         pos_frame, neg_frame = self._inject_img(self.carrier_img, color_deltaE=3.0)
 
@@ -230,11 +230,18 @@ class EventAttack:
         #injection_mask = self._create_injection_mask(self.inject_img)
         #pos_tex, x0, y0, w, h = self._create_masked_texture(pos_frame, injection_mask)
         #neg_tex, _, _, _, _ = self._create_masked_texture(neg_frame, injection_mask)
-
+        key_map = {
+            "ESC": glfw.KEY_ESCAPE,
+            "Q": glfw.KEY_Q,
+            "SPACE": glfw.KEY_SPACE,
+            "ENTER": glfw.KEY_ENTER,
+        }
         start_time = time.perf_counter()
         while not glfw.window_should_close(self.window):
             glClear(GL_COLOR_BUFFER_BIT)
             t = time.perf_counter() - start_time
+            if duration is not None and (t >= duration):
+                break
             phase = int(t * self.fps) % 2
 
             # Flash between positive and negative frames

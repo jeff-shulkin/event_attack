@@ -18,7 +18,7 @@ def main(args):
 
     # Start flickering with a given image
     print("Starting image flicker...")
-    attack.flicker(None, None)
+    attack.flicker()
     print("Ending image flicker...")
 
 if __name__ == "__main__":
