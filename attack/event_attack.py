@@ -103,8 +103,46 @@ class EventAttack:
         return pos_carrier, neg_carrier
 
     # Attack functions
-    def _vibrate_img(self):
-        raise NotImplementedError
+    def _vibrate_img(self, img, dx, dy, wrap=False, fill=(0,0,0,0)):
+        """
+        Shift image (HxWxC) by integer dx,dy.
+        - dx > 0 => shift right, dy > 0 => shift down.
+        - wrap: use np.roll (toroidal). Otherwise pads with `fill`.
+        - fill: tuple with length C (e.g., (0,0,0,0) for BGRA).
+        """
+        if dx == 0 and dy == 0:
+            return img.copy()
+
+        h, w = img.shape[:2]
+        if wrap:
+            shifted = np.roll(img, shift=dy, axis=0)
+            shifted = np.roll(shifted, shift=dx, axis=1)
+            return shifted
+
+        # pad-and-copy approach
+        C = img.shape[2] if img.ndim == 3 else 1
+        out = np.zeros_like(img)
+        fv = np.array(fill, dtype=img.dtype)
+        if fv.size == 1:
+            fv = np.repeat(fv, C)
+        out[:] = fv
+
+        # compute overlapping region between source and destination
+        src_x0 = max(0, -dx)
+        src_x1 = min(w, w - dx)
+        src_y0 = max(0, -dy)
+        src_y1 = min(h, h - dy)
+
+        dst_x0 = max(0, dx)
+        dst_x1 = dst_x0 + (src_x1 - src_x0)
+        dst_y0 = max(0, dy)
+        dst_y1 = dst_y0 + (src_y1 - src_y0)
+
+        if src_x1 <= src_x0 or src_y1 <= src_y0:
+            return out  # fully shifted out
+
+        out[dst_y0:dst_y1, dst_x0:dst_x1, ...] = img[src_y0:src_y1, src_x0:src_x1, ...]
+        return out
     
     # Setup functions
     def _init_window(self):
@@ -222,6 +260,7 @@ class EventAttack:
     def flicker(self, duration=60, quit_key="ESC"):
         # Generate the positive and negative frames to flicker between
         pos_frame, neg_frame = self._inject_img(self.carrier_img, color_deltaE=3.0)
+        pos_frame = self._vibrate_img(pos_frame, dx=10, dy=0, wrap=False, fill=(0, 0, 0))
 
         # Load textures once instead of every frame for efficiency
         pos_tex, _, _ = self._load_texture_from_array(pos_frame)

@@ -23,8 +23,7 @@ def init_window():
     if not glfw.init():
         raise RuntimeError("Failed to init GLFW")
 
-    #monitor = glfw.get_primary_monitor()
-    monitor = glfw.get_monitors()[1]
+    monitor = glfw.get_primary_monitor()
     mode = glfw.get_video_mode(monitor)
 
     # Resolve width/height differences across bindings
@@ -129,4 +128,4 @@ if __name__ == "__main__":
     parser.add_argument("-f", "--flicker_type", choices=["fixed", "lfm"], default="fixed")
     args = parser.parse_args()
     image_path = pathlib.Path(args.image_filename)
-    run_flicker(image_path, flicker_type=args.flicker_type)
+    run_flicker(image_path=image_path, flicker_type=args.flicker_type)
