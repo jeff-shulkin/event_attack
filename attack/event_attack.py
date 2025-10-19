@@ -7,7 +7,8 @@ from PIL import Image
 from OpenGL.GL import *
 import pathlib
 import time
-from skimage.feature import greycomatrix, greycoprops
+from skimage.feature import graycomatrix, graycoprops
+from skimage.util.shape import view_as_windows
 
 class EventAttack:
     def __init__(self, inject_img_path : pathlib.Path, carrier_img_path: pathlib.Path, attack_method : str, fps : int):
@@ -84,32 +85,19 @@ class EventAttack:
         return shifted
 
 
-    def _compute_texture_map(gray_img, window_size=9, displacement=(1,0)):
-        """
-        Compute a per-pixel texture map based on local contrast via GLCM.
-        gray_img: HxW grayscale image
-        Returns: texture_map, same HxW as input
-        """
-        H, W = gray_img.shape
-        pad = window_size // 2
-        padded = np.pad(gray_img, pad, mode='reflect')
-        
-        texture_map = np.zeros_like(gray_img, dtype=np.float32)
-        
-        for y in range(H):
-            for x in range(W):
-                window = padded[y:y+window_size, x:x+window_size]
-                # GLCM expects integer gray levels 0..levels-1
-                levels = 256
-                glcm = greycomatrix(window, distances=[displacement[0]], angles=[0], levels=levels, symmetric=True, normed=True)
-                contrast = greycoprops(glcm, 'contrast')[0,0]  # shape (1,1)
-                texture_map[y, x] = contrast
-        
-        # Normalize by max
-        texture_map /= texture_map.max()
-        return texture_map
+    def _compute_texture_map(self, img):
+        # gray_img: HxW uint8
+        gray_img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        gray_img = gray_img.astype(np.float32)
+        padded = np.pad(gray_img, 4, mode='reflect')  # 9x9 window
 
-    def _texture_scaling(texture_map, k=0.3):
+        windows = view_as_windows(padded, (9,9))  # shape: HxWx9x9
+        # contrast = sum((i-j)^2) / (81^2) simplified as var
+        contrast_map = np.var(windows, axis=(2,3))  # HxW float
+        contrast_map /= contrast_map.max()  # normalize 0..1
+        return contrast_map
+
+    def _texture_scaling(self, texture_map, k=0.3):
         """
         Convert normalized texture to per-pixel scaling factor alpha.
         k = minimal scaling factor
@@ -126,7 +114,7 @@ class EventAttack:
         cv2.destroyWindow(winname)
 
     # Inject attack img into carrier image
-    def _inject_img(self, carrier_img, color_deltaE=3.0):
+    def _inject_img(self, carrier_img, color_deltaE=1.0):
         # Convert images to LAB space
         #inject_lab = cv2.cvtColor(self.inject_img, cv2.COLOR_BGR2LAB)
         carrier_lab = cv2.cvtColor(carrier_img, cv2.COLOR_BGR2LAB)
@@ -142,8 +130,10 @@ class EventAttack:
         #self._show_mask_cv(injection_mask)
         
         # Compute the texture map to alter delta_L
-        texture_map = compute_texture_map(cv2.cvtColor(self.carrier_img, cv2.COLOR_BGR2GRAY))
-        alpha_map = texture_scaling(texture_map, k=0.3)
+        texture_map = self._compute_texture_map(self.carrier_img)
+        #print("Created texture map!")
+        alpha_map = self._texture_scaling(texture_map, k=0.3)
+       # print("Created alpha map!")
         delta_L *= alpha_map
     
         # Create the negative and positive images
@@ -182,8 +172,8 @@ class EventAttack:
         # Fullscreen window
         glfw.window_hint(glfw.DECORATED, glfw.FALSE)
         glfw.window_hint(glfw.FLOATING, glfw.TRUE)
-        glfw.window_hint(glfw.TRANSPARENT_FRAMEBUFFER, glfw.TRUE)
-        #glfw.window_hint(glfw.SRGB_CAPABLE, glfw.FALSE)
+        glfw.window_hint(glfw.TRANSPARENT_FRAMEBUFFER, glfw.FALSE)
+        glfw.window_hint(glfw.SRGB_CAPABLE, glfw.FALSE)
 
         window = glfw.create_window(self.monitor_W, self.monitor_H, "Image Flicker", monitor, None)
         if not window:
@@ -200,9 +190,9 @@ class EventAttack:
         glMatrixMode(GL_MODELVIEW)
         glLoadIdentity()
 
-        glEnable(GL_BLEND)
-        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
-        #glDisable(GL_BLEND)
+        #glEnable(GL_BLEND)
+        #glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+        glDisable(GL_BLEND)
         glClearColor(0.0, 0.0, 0.0, 1.0)
 
         return window, self.monitor_W, self.monitor_H
