@@ -7,7 +7,7 @@ from PIL import Image
 from OpenGL.GL import *
 import pathlib
 import time
-
+from skimage.feature import greycomatrix, greycoprops
 
 class EventAttack:
     def __init__(self, inject_img_path : pathlib.Path, carrier_img_path: pathlib.Path, attack_method : str, fps : int):
@@ -82,6 +82,41 @@ class EventAttack:
 
         shifted[dst_y0:dst_y1, dst_x0:dst_x1] = mask[src_y0:src_y1, src_x0:src_x1]
         return shifted
+
+
+    def _compute_texture_map(gray_img, window_size=9, displacement=(1,0)):
+        """
+        Compute a per-pixel texture map based on local contrast via GLCM.
+        gray_img: HxW grayscale image
+        Returns: texture_map, same HxW as input
+        """
+        H, W = gray_img.shape
+        pad = window_size // 2
+        padded = np.pad(gray_img, pad, mode='reflect')
+        
+        texture_map = np.zeros_like(gray_img, dtype=np.float32)
+        
+        for y in range(H):
+            for x in range(W):
+                window = padded[y:y+window_size, x:x+window_size]
+                # GLCM expects integer gray levels 0..levels-1
+                levels = 256
+                glcm = greycomatrix(window, distances=[displacement[0]], angles=[0], levels=levels, symmetric=True, normed=True)
+                contrast = greycoprops(glcm, 'contrast')[0,0]  # shape (1,1)
+                texture_map[y, x] = contrast
+        
+        # Normalize by max
+        texture_map /= texture_map.max()
+        return texture_map
+
+    def _texture_scaling(texture_map, k=0.3):
+        """
+        Convert normalized texture to per-pixel scaling factor alpha.
+        k = minimal scaling factor
+        Returns: alpha_map same size as texture_map
+        """
+        alpha_map = texture_map * (1 - k) + k
+        return alpha_map
     
     def _show_mask_cv(self, mask, winname="mask"):
         # mask: boolean HxW
@@ -105,6 +140,11 @@ class EventAttack:
         S_L = 1 + ((0.015 * (carrier_L - 50) ** 2) / (np.sqrt(20 + (carrier_L - 50) ** 2)))
         delta_L = k_L * S_L * color_deltaE
         #self._show_mask_cv(injection_mask)
+        
+        # Compute the texture map to alter delta_L
+        texture_map = compute_texture_map(cv2.cvtColor(self.carrier_img, cv2.COLOR_BGR2GRAY))
+        alpha_map = texture_scaling(texture_map, k=0.3)
+        delta_L *= alpha_map
     
         # Create the negative and positive images
         pos_carrier_lab = carrier_lab.copy().astype(np.float32)
