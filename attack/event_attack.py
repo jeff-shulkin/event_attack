@@ -114,7 +114,7 @@ class EventAttack:
         cv2.destroyWindow(winname)
 
     # Inject attack img into carrier image
-    def _inject_img(self, carrier_img, color_deltaE=1.0):
+    def _inject_img(self, carrier_img, color_deltaE=3.0):
         # Convert images to LAB space
         #inject_lab = cv2.cvtColor(self.inject_img, cv2.COLOR_BGR2LAB)
         carrier_lab = cv2.cvtColor(carrier_img, cv2.COLOR_BGR2LAB)
@@ -272,7 +272,7 @@ class EventAttack:
             "SPACE": glfw.KEY_SPACE,
             "ENTER": glfw.KEY_ENTER,
         }
-        start_time = time.perf_counter()
+        start_time = time.perf_counter_ns()
         while not glfw.window_should_close(self.window):
             glClear(GL_COLOR_BUFFER_BIT)
             t = time.perf_counter() - start_time
