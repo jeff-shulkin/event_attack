@@ -62,6 +62,27 @@ class EventAttack:
 
         return injection_mask
 
+    def _shift_mask(self, mask, dx, dy):
+        """Shift a boolean mask by (dx, dy) with zero padding."""
+        h, w = mask.shape
+        shifted = np.zeros_like(mask)
+        
+        src_x0 = max(0, -dx)
+        src_x1 = min(w, w - dx)
+        src_y0 = max(0, -dy)
+        src_y1 = min(h, h - dy)
+
+        dst_x0 = max(0, dx)
+        dst_x1 = dst_x0 + (src_x1 - src_x0)
+        dst_y0 = max(0, dy)
+        dst_y1 = dst_y0 + (src_y1 - src_y0)
+
+        if src_x1 <= src_x0 or src_y1 <= src_y0:
+            return shifted
+
+        shifted[dst_y0:dst_y1, dst_x0:dst_x1] = mask[src_y0:src_y1, src_x0:src_x1]
+        return shifted
+    
     def _show_mask_cv(self, mask, winname="mask"):
         # mask: boolean HxW
         vis = (mask.astype(np.uint8) * 255)  # 0 or 255
@@ -77,8 +98,7 @@ class EventAttack:
 
         # Create injection mask to embed into carrier image
         injection_mask = self._create_injection_mask(self.inject_img)
-        #print(f"Injection mask: {injection_mask}")
-        #self._show_mask_cv(injection_mask)
+        
         # Calculate the lightness change for the color difference color_deltaE
         carrier_L = carrier_lab[:, :, 0].astype(np.float32)
         k_L = 1.0
@@ -90,7 +110,7 @@ class EventAttack:
         pos_carrier_lab = carrier_lab.copy().astype(np.float32)
         neg_carrier_lab = carrier_lab.copy().astype(np.float32)
         
-        pos_carrier_lab[:, :, 0][injection_mask] += delta_L[injection_mask]
+        pos_carrier_lab[:, :, 0][self._shift_mask(injection_mask, dx=1, dy=0)] += delta_L[self._shift_mask(injection_mask, dx=1, dy=0)]
         neg_carrier_lab[:, :, 0][injection_mask] -= delta_L[injection_mask]
 
         pos_carrier_lab = np.clip(pos_carrier_lab, 0, 255).astype(np.uint8)
@@ -101,48 +121,6 @@ class EventAttack:
         neg_carrier = cv2.cvtColor(neg_carrier_lab, cv2.COLOR_LAB2BGR)
 
         return pos_carrier, neg_carrier
-
-    # Attack functions
-    def _vibrate_img(self, img, dx, dy, wrap=False, fill=(0,0,0,0)):
-        """
-        Shift image (HxWxC) by integer dx,dy.
-        - dx > 0 => shift right, dy > 0 => shift down.
-        - wrap: use np.roll (toroidal). Otherwise pads with `fill`.
-        - fill: tuple with length C (e.g., (0,0,0,0) for BGRA).
-        """
-        if dx == 0 and dy == 0:
-            return img.copy()
-
-        h, w = img.shape[:2]
-        if wrap:
-            shifted = np.roll(img, shift=dy, axis=0)
-            shifted = np.roll(shifted, shift=dx, axis=1)
-            return shifted
-
-        # pad-and-copy approach
-        C = img.shape[2] if img.ndim == 3 else 1
-        out = np.zeros_like(img)
-        fv = np.array(fill, dtype=img.dtype)
-        if fv.size == 1:
-            fv = np.repeat(fv, C)
-        out[:] = fv
-
-        # compute overlapping region between source and destination
-        src_x0 = max(0, -dx)
-        src_x1 = min(w, w - dx)
-        src_y0 = max(0, -dy)
-        src_y1 = min(h, h - dy)
-
-        dst_x0 = max(0, dx)
-        dst_x1 = dst_x0 + (src_x1 - src_x0)
-        dst_y0 = max(0, dy)
-        dst_y1 = dst_y0 + (src_y1 - src_y0)
-
-        if src_x1 <= src_x0 or src_y1 <= src_y0:
-            return out  # fully shifted out
-
-        out[dst_y0:dst_y1, dst_x0:dst_x1, ...] = img[src_y0:src_y1, src_x0:src_x1, ...]
-        return out
     
     # Setup functions
     def _init_window(self):
@@ -186,18 +164,6 @@ class EventAttack:
         glClearColor(0.0, 0.0, 0.0, 1.0)
 
         return window, self.monitor_W, self.monitor_H
-    
-    def _load_texture(self, image_path: pathlib.Path):
-        img = Image.open(image_path).convert("RGBA")
-        img_data = img.tobytes("raw", "RGBA", 0, -1)
-        w, h = img.size
-
-        tex_id = glGenTextures(1)
-        glBindTexture(GL_TEXTURE_2D, tex_id)
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR)
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, img_data)
-        return tex_id, w, h
 
     def _load_texture_from_array(self, img_array):
         # Convert BGR to RGBA
@@ -260,7 +226,6 @@ class EventAttack:
     def flicker(self, duration=60, quit_key="ESC"):
         # Generate the positive and negative frames to flicker between
         pos_frame, neg_frame = self._inject_img(self.carrier_img, color_deltaE=3.0)
-        pos_frame = self._vibrate_img(pos_frame, dx=10, dy=0, wrap=False, fill=(0, 0, 0))
 
         # Load textures once instead of every frame for efficiency
         pos_tex, _, _ = self._load_texture_from_array(pos_frame)
