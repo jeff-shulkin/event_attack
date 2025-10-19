@@ -143,6 +143,7 @@ class EventAttack:
         glfw.window_hint(glfw.DECORATED, glfw.FALSE)
         glfw.window_hint(glfw.FLOATING, glfw.TRUE)
         glfw.window_hint(glfw.TRANSPARENT_FRAMEBUFFER, glfw.TRUE)
+        #glfw.window_hint(glfw.SRGB_CAPABLE, glfw.FALSE)
 
         window = glfw.create_window(self.monitor_W, self.monitor_H, "Image Flicker", monitor, None)
         if not window:
@@ -161,6 +162,7 @@ class EventAttack:
 
         glEnable(GL_BLEND)
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+        #glDisable(GL_BLEND)
         glClearColor(0.0, 0.0, 0.0, 1.0)
 
         return window, self.monitor_W, self.monitor_H
