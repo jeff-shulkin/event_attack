@@ -275,7 +275,8 @@ class EventAttack:
         start_time = time.perf_counter_ns()
         while not glfw.window_should_close(self.window):
             glClear(GL_COLOR_BUFFER_BIT)
-            t = time.perf_counter() - start_time
+            t = (time.perf_counter_ns() - start_time) / 10e9
+            print(f"Time: {t}")
             if duration is not None and (t >= duration):
                 break
             phase = int(t * self.fps) % 2
