@@ -255,7 +255,7 @@ class EventAttack:
 
         glDisable(GL_TEXTURE_2D)
 
-    def flicker(self, duration=60, quit_key="ESC"):
+    def flicker(self, duration=10, quit_key="ESC"):
         # Generate the positive and negative frames to flicker between
         pos_frame, neg_frame = self._inject_img(self.carrier_img, color_deltaE=3.0)
 
@@ -263,9 +263,9 @@ class EventAttack:
         pos_tex, _, _ = self._load_texture_from_array(pos_frame)
         neg_tex, _, _ = self._load_texture_from_array(neg_frame)
 
-        #injection_mask = self._create_injection_mask(self.inject_img)
-        #pos_tex, x0, y0, w, h = self._create_masked_texture(pos_frame, injection_mask)
-        #neg_tex, _, _, _, _ = self._create_masked_texture(neg_frame, injection_mask)
+        injection_mask = self._create_injection_mask(self.inject_img)
+        pos_tex, x0, y0, w, h = self._create_masked_texture(pos_frame, injection_mask)
+        neg_tex, _, _, _, _ = self._create_masked_texture(neg_frame, injection_mask)
         key_map = {
             "ESC": glfw.KEY_ESCAPE,
             "Q": glfw.KEY_Q,
@@ -275,7 +275,7 @@ class EventAttack:
         start_time = time.perf_counter_ns()
         while not glfw.window_should_close(self.window):
             glClear(GL_COLOR_BUFFER_BIT)
-            t = (time.perf_counter_ns() - start_time) / 10e9
+            t = (time.perf_counter_ns() - start_time) / 1e9
             print(f"Time: {t}")
             if duration is not None and (t >= duration):
                 break
@@ -283,8 +283,8 @@ class EventAttack:
 
             # Flash between positive and negative frames
             tex_id = pos_tex if phase == 0 else neg_tex
-            self._draw_fullscreen_image(tex_id, self.monitor_W, self.monitor_H)
-            #self._draw_masked_region(tex_id, x0, y0, w, h)
+            #self._draw_fullscreen_image(tex_id, self.monitor_W, self.monitor_H)
+            self._draw_masked_region(tex_id, x0, y0, w, h)
 
             glfw.swap_buffers(self.window)
             glfw.poll_events()
