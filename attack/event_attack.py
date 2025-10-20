@@ -11,9 +11,9 @@ from skimage.feature import graycomatrix, graycoprops
 from skimage.util.shape import view_as_windows
 
 class EventAttack:
-    def __init__(self, inject_img_path : pathlib.Path, carrier_img_path: pathlib.Path, attack_method : str, fps : int):
+    def __init__(self, monitor_id : int, inject_img_path : pathlib.Path, carrier_img_path: pathlib.Path, attack_method : str, fps : int):
         # Initialize OpenGL window
-        self.window, self.W, self.H = self._init_window()
+        self.window, self.W, self.H = self._init_window(monitor_id=monitor_id)
 
         # Read in both the carrier and attack images
         self.inject_img = cv2.imread(inject_img_path, cv2.IMREAD_UNCHANGED)
@@ -159,17 +159,18 @@ class EventAttack:
         #self._show_mask_cv(injection_mask)
         
         # Compute the texture map to alter delta_L
-        texture_map = self._compute_texture_map(self.carrier_img)
+        #texture_map = self._compute_texture_map(self.carrier_img)
         #print("Created texture map!")
-        alpha_map = self._texture_scaling(texture_map, k=0.3)
+        #alpha_map = self._texture_scaling(texture_map, k=0.3)
        # print("Created alpha map!")
-        delta_L *= alpha_map
+        #delta_L *= alpha_map
     
         # Create the negative and positive images
         pos_carrier_lab = carrier_lab.copy().astype(np.float32)
         neg_carrier_lab = carrier_lab.copy().astype(np.float32)
         
-        pos_carrier_lab[:, :, 0][self._scale_mask(injection_mask, scale_factor=0.5)] += delta_L[self._scale_mask(injection_mask, scale_factor=0.5)]
+        shifted_mask = self._shift_mask(injection_mask, dx=100, dy=100)
+        pos_carrier_lab[:, :, 0][injection_mask] += delta_L[injection_mask]
         neg_carrier_lab[:, :, 0][injection_mask] -= delta_L[injection_mask]
 
         pos_carrier_lab = np.clip(pos_carrier_lab, 0, 255).astype(np.uint8)
@@ -182,12 +183,12 @@ class EventAttack:
         return pos_carrier, neg_carrier
     
     # Setup functions
-    def _init_window(self):
+    def _init_window(self, monitor_id):
         if not glfw.init():
             raise RuntimeError("Failed to init GLFW")
 
         monitor = glfw.get_primary_monitor()
-        #monitor = glfw.get_monitors()[1]
+        monitor = glfw.get_monitors()[1]
         mode = glfw.get_video_mode(monitor)
 
         # Resolve width/height differences across bindings
@@ -284,17 +285,17 @@ class EventAttack:
 
         glDisable(GL_TEXTURE_2D)
 
-    def flicker(self, duration=10, black_frame_interval=50, quit_key="ESC"):
+    def flicker(self, duration=10, black_frame_interval=100):
         # Generate the positive and negative frames to flicker between
-        pos_frame, neg_frame = self._inject_img(self.carrier_img, color_deltaE=5.0)
+        pos_frame, neg_frame = self._inject_img(self.carrier_img, color_deltaE=1.25)
         black_frame = np.zeros((self.monitor_H, self.monitor_W, 3), dtype=np.uint8)
-        # Load textures once instead of every frame for efficiency
-        #pos_tex, _, _ = self._load_texture_from_array(pos_frame)
-        #neg_tex, _, _ = self._load_texture_from_array(neg_frame)
 
         injection_mask = self._create_injection_mask(self.inject_img)
         pos_tex, x0, y0, w, h = self._create_masked_texture(pos_frame, injection_mask)
         neg_tex, _, _, _, _ = self._create_masked_texture(neg_frame, injection_mask)
+
+        # Some helpers for experiments
+        original_tex, _, _ = self._load_texture_from_array(self.carrier_img)
         black_tex, _, _ = self._load_texture_from_array(black_frame)
         key_map = {
             "ESC": glfw.KEY_ESCAPE,
@@ -308,28 +309,28 @@ class EventAttack:
         while not glfw.window_should_close(self.window):
             glClear(GL_COLOR_BUFFER_BIT)
             t = (time.perf_counter_ns() - start_time) / 1e9
+            
             if duration is not None and (t >= duration):
                 break
-            if black_frame_interval > 0 and frame_count % black_frame_interval == 0:
-                # Show black frame
-                self._draw_fullscreen_image(black_tex, self.monitor_W, self.monitor_H)
-                print(f"Black frame at frame {frame_count}")
-            else:
-                # Normal flicker pattern
-                phase = int(t * self.fps) % 2
-                tex_id = pos_tex if phase == 0 else neg_tex
-                self._draw_masked_region(tex_id, x0, y0, w, h)
             
-            #phase = int(t * self.fps) % 2
+            #if black_frame_interval > 0 and frame_count % black_frame_interval == 0:
+            #    # Show black frame
+            #    self._draw_fullscreen_image(black_tex, self.monitor_W, self.monitor_H)
+            #    print(f"Black frame at frame {frame_count}")
+            #else:
+                # Normal flicker pattern
+            #    phase = int(t * self.fps) % 2
+            #    tex_id = pos_tex if phase == 0 else neg_tex
+            #    self._draw_masked_region(tex_id, x0, y0, w, h)
+            
+            phase = int(t * self.fps) % 2
 
             # Flash between positive and negative frames
-            #tex_id = pos_tex if phase == 0 else black_tex if phase == 1 else neg_tex
-            #tex_id = pos_tex if phase == 0 else neg_tex
+            tex_id = pos_tex if phase == 0 else neg_tex
             #if frame_count % 10 == 0:
-            #    self._draw_fullscreen_image(black_tex, self.monitor_W, self.monitor_H)
-            #    continue
-            #self._draw_fullscreen_image(tex_id, self.monitor_W, self.monitor_H)
-            #self._draw_masked_region(tex_id, x0, y0, w, h)
+            #   self._draw_fullscreen_image(black_tex, self.monitor_W, self.monitor_H)
+            #   continue
+            self._draw_masked_region(tex_id, x0, y0, w, h)
 
             glfw.swap_buffers(self.window)
             glfw.poll_events()

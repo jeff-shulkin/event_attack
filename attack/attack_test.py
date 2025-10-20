@@ -6,11 +6,13 @@ def main(args):
     injected_image_filename = args.injected_image_filename
     carrier_image_filename = args.carrier_image_filename
     flicker_fps = args.fps
+    monitor_id = args.monitor_id
 
     print("Initializing attack...")
     attack = EventAttack(
+        monitor_id=monitor_id,
         inject_img_path=injected_image_filename,
-        carrier_img_path = carrier_image_filename,
+        carrier_img_path=carrier_image_filename,
         attack_method="linear",
         fps=flicker_fps
     )
@@ -26,5 +28,6 @@ if __name__ == "__main__":
     parser.add_argument("-i", "--injected_image_filename", type=str, required=True)
     parser.add_argument("-c", "--carrier_image_filename", type=str, required=True)
     parser.add_argument("-f", "--fps", type=int, required=True)
+    parser.add_argument("-m", "--monitor_id", type=int, required=True)
     args = parser.parse_args()
     main(args)
