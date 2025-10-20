@@ -84,6 +84,35 @@ class EventAttack:
         shifted[dst_y0:dst_y1, dst_x0:dst_x1] = mask[src_y0:src_y1, src_x0:src_x1]
         return shifted
 
+    def _scale_mask(self, mask, scale_factor):
+        """Scale a boolean mask around its center by a given factor."""
+        h, w = mask.shape
+        center = (w // 2, h // 2)
+
+        # Convert boolean mask to uint8 image for resizing
+        mask_uint8 = (mask.astype(np.uint8) * 255)
+
+        # Compute new size
+        new_w = int(w * scale_factor)
+        new_h = int(h * scale_factor)
+
+        # Resize using OpenCV (preserves general shape)
+        resized = cv2.resize(mask_uint8, (new_w, new_h), interpolation=cv2.INTER_NEAREST)
+
+        # Create blank canvas and paste resized mask centered
+        scaled = np.zeros_like(mask_uint8)
+        x0 = max(center[0] - new_w // 2, 0)
+        y0 = max(center[1] - new_h // 2, 0)
+        x1 = min(x0 + new_w, w)
+        y1 = min(y0 + new_h, h)
+
+        resized_x0 = max(0, - (center[0] - new_w // 2))
+        resized_y0 = max(0, - (center[1] - new_h // 2))
+        resized_x1 = resized_x0 + (x1 - x0)
+        resized_y1 = resized_y0 + (y1 - y0)
+
+        scaled[y0:y1, x0:x1] = resized[resized_y0:resized_y1, resized_x0:resized_x1]
+        return scaled > 0
 
     def _compute_texture_map(self, img):
         # gray_img: HxW uint8
@@ -140,7 +169,7 @@ class EventAttack:
         pos_carrier_lab = carrier_lab.copy().astype(np.float32)
         neg_carrier_lab = carrier_lab.copy().astype(np.float32)
         
-        pos_carrier_lab[:, :, 0][self._shift_mask(injection_mask, dx=1, dy=0)] += delta_L[self._shift_mask(injection_mask, dx=1, dy=0)]
+        pos_carrier_lab[:, :, 0][self._scale_mask(injection_mask, scale_factor=0.5)] += delta_L[self._scale_mask(injection_mask, scale_factor=0.5)]
         neg_carrier_lab[:, :, 0][injection_mask] -= delta_L[injection_mask]
 
         pos_carrier_lab = np.clip(pos_carrier_lab, 0, 255).astype(np.uint8)
@@ -255,38 +284,56 @@ class EventAttack:
 
         glDisable(GL_TEXTURE_2D)
 
-    def flicker(self, duration=10, quit_key="ESC"):
+    def flicker(self, duration=10, black_frame_interval=50, quit_key="ESC"):
         # Generate the positive and negative frames to flicker between
-        pos_frame, neg_frame = self._inject_img(self.carrier_img, color_deltaE=3.0)
-
+        pos_frame, neg_frame = self._inject_img(self.carrier_img, color_deltaE=5.0)
+        black_frame = np.zeros((self.monitor_H, self.monitor_W, 3), dtype=np.uint8)
         # Load textures once instead of every frame for efficiency
-        pos_tex, _, _ = self._load_texture_from_array(pos_frame)
-        neg_tex, _, _ = self._load_texture_from_array(neg_frame)
+        #pos_tex, _, _ = self._load_texture_from_array(pos_frame)
+        #neg_tex, _, _ = self._load_texture_from_array(neg_frame)
 
         injection_mask = self._create_injection_mask(self.inject_img)
         pos_tex, x0, y0, w, h = self._create_masked_texture(pos_frame, injection_mask)
         neg_tex, _, _, _, _ = self._create_masked_texture(neg_frame, injection_mask)
+        black_tex, _, _ = self._load_texture_from_array(black_frame)
         key_map = {
             "ESC": glfw.KEY_ESCAPE,
             "Q": glfw.KEY_Q,
             "SPACE": glfw.KEY_SPACE,
             "ENTER": glfw.KEY_ENTER,
         }
+
+        frame_count = 0
         start_time = time.perf_counter_ns()
         while not glfw.window_should_close(self.window):
             glClear(GL_COLOR_BUFFER_BIT)
             t = (time.perf_counter_ns() - start_time) / 1e9
-            print(f"Time: {t}")
             if duration is not None and (t >= duration):
                 break
-            phase = int(t * self.fps) % 2
+            if black_frame_interval > 0 and frame_count % black_frame_interval == 0:
+                # Show black frame
+                self._draw_fullscreen_image(black_tex, self.monitor_W, self.monitor_H)
+                print(f"Black frame at frame {frame_count}")
+            else:
+                # Normal flicker pattern
+                phase = int(t * self.fps) % 2
+                tex_id = pos_tex if phase == 0 else neg_tex
+                self._draw_masked_region(tex_id, x0, y0, w, h)
+            
+            #phase = int(t * self.fps) % 2
 
             # Flash between positive and negative frames
-            tex_id = pos_tex if phase == 0 else neg_tex
+            #tex_id = pos_tex if phase == 0 else black_tex if phase == 1 else neg_tex
+            #tex_id = pos_tex if phase == 0 else neg_tex
+            #if frame_count % 10 == 0:
+            #    self._draw_fullscreen_image(black_tex, self.monitor_W, self.monitor_H)
+            #    continue
             #self._draw_fullscreen_image(tex_id, self.monitor_W, self.monitor_H)
-            self._draw_masked_region(tex_id, x0, y0, w, h)
+            #self._draw_masked_region(tex_id, x0, y0, w, h)
 
             glfw.swap_buffers(self.window)
             glfw.poll_events()
+
+            frame_count += 1
 
         glfw.terminate()
