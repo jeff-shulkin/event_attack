@@ -1,5 +1,5 @@
-carrier_image: /mnt/c/Users/Jeff/Pictures/mr_frog.png # Path to carrier image
-injected_image: /mnt/c/Users/Jeff/Pictures/stopsign.png # Path to injected/attack image
+carrier_image: C:/Users/Jeff/Pictures/mr_frog.jpg # Path to carrier image
+injected_image: C:/Users/Jeff/Pictures/stopsign.png # Path to injected/attack image
 
 color_deltaE: 1.5 # Units: L space difference
 duration: 10.0 # Units: seconds
@@ -8,8 +8,9 @@ dx: 0.0 # Units: Pixels
 dy: 0.0 # Units: Pixels
 scale: 1.0 # Units: None
 
-monitor_id: 1 # Monitor choice (primary or secondary)
+monitor_id: 0 # Monitor choice (primary or secondary)
 
 attack_method: # Choices: [freq, lfm, contrast_injection]
   type: contrast_injection
+  fps: 60.0 # Units: Hz
   injection_period: 1 # Units: seconds

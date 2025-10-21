@@ -347,7 +347,8 @@ class EventAttack:
     def _contrast_injection(self) -> None:
         # Extract Contrast Injection-specifc parameters
         injection_period = self.attack_method["injection_period"]
-        frame_dur = 1.0 / float(self.fps)
+        fps = self.attack_method["fps"]
+        frame_dur = 1.0 / float(fps)
 
         # Generate positive and negative frames
         pos_frame, neg_frame, mask = self._inject_img(self.carrier_img, color_deltaE=self.color_deltaE)
