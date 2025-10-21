@@ -7,33 +7,39 @@ from PIL import Image
 from OpenGL.GL import *
 import pathlib
 import time
+import yaml
+from yaml.loader import FullLoader
 from skimage.feature import graycomatrix, graycoprops
 from skimage.util.shape import view_as_windows
 
 class EventAttack:
-    def __init__(self, monitor_id : int, inject_img_path : pathlib.Path, carrier_img_path: pathlib.Path, attack_method : str, fps : int):
+    def __init__(self, attack_config_path : pathlib.Path):
+        self.attack_config = self._parse_attack_config(attack_config_path)
+        print(self.attack_config)
+
+        # Initialize global settings
+        self.color_deltaE = self.attack_config["color_deltaE"]
+        self.duration = self.attack_config["duration"]
+        self.dx = self.attack_config["dx"]
+        self.dy = self.attack_config["dy"]
+        self.scale = self.attack_config["scale"]
+        self.monitor_id = self.attack_config["monitor_id"]
+        self.attack_method = self.attack_config["attack_method"]
+
         # Initialize OpenGL window
-        self.window, self.W, self.H = self._init_window(monitor_id=monitor_id)
-
+        self.window, self.W, self.H = self._init_window(monitor_id=self.monitor_id)
+        
         # Read in both the carrier and attack images
-        self.inject_img = cv2.imread(inject_img_path, cv2.IMREAD_UNCHANGED)
-        self.carrier_img = cv2.imread(carrier_img_path, cv2.IMREAD_UNCHANGED)
-
-        # Resize images to min size
-        h_c, w_c = self.carrier_img.shape[:2]
-        h_i, w_i = self.inject_img.shape[:2]
-
-        new_h = min(h_c, h_i)
-        new_w = min(w_c, w_i)
+        self.inject_img = cv2.imread(self.attack_config["injected_image"], cv2.IMREAD_UNCHANGED)
+        self.carrier_img = cv2.imread(self.attack_config["carrier_image"], cv2.IMREAD_UNCHANGED)
         self.inject_img = cv2.resize(self.inject_img, (self.monitor_W, self.monitor_H), interpolation=cv2.INTER_LINEAR)
         self.carrier_img = cv2.resize(self.carrier_img, (self.monitor_W, self.monitor_H), interpolation=cv2.INTER_LINEAR)
-        self.attack_method = attack_method
-        self.fps = fps
+    
+    # Parse YAML config file
+    def _parse_attack_config(self, config_path : pathlib.Path):
+        with open(config_path, 'r') as stream:
+            return yaml.load(stream, Loader=FullLoader)
 
-        #cv2.imshow("Frame", self.inject_img)
-        #cv2.waitKey(1)
-
-    # Create injection mask
     def _create_injection_mask(self, injection_img):
         """
         Create a mask for embedding the injected image into the carrier.
@@ -57,9 +63,6 @@ class EventAttack:
 
         # Combine alpha and letter masks
         injection_mask = np.logical_and(alpha_mask, letter_mask)
-
-        # Optional: visualize mask
-        # self._show_mask_cv(injection_mask, winname="Injection Mask")
 
         return injection_mask
 
@@ -113,27 +116,6 @@ class EventAttack:
 
         scaled[y0:y1, x0:x1] = resized[resized_y0:resized_y1, resized_x0:resized_x1]
         return scaled > 0
-
-    def _compute_texture_map(self, img):
-        # gray_img: HxW uint8
-        gray_img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        gray_img = gray_img.astype(np.float32)
-        padded = np.pad(gray_img, 4, mode='reflect')  # 9x9 window
-
-        windows = view_as_windows(padded, (9,9))  # shape: HxWx9x9
-        # contrast = sum((i-j)^2) / (81^2) simplified as var
-        contrast_map = np.var(windows, axis=(2,3))  # HxW float
-        contrast_map /= contrast_map.max()  # normalize 0..1
-        return contrast_map
-
-    def _texture_scaling(self, texture_map, k=0.3):
-        """
-        Convert normalized texture to per-pixel scaling factor alpha.
-        k = minimal scaling factor
-        Returns: alpha_map same size as texture_map
-        """
-        alpha_map = texture_map * (1 - k) + k
-        return alpha_map
     
     def _show_mask_cv(self, mask, winname="mask"):
         # mask: boolean HxW
@@ -143,7 +125,7 @@ class EventAttack:
         cv2.destroyWindow(winname)
 
     # Inject attack img into carrier image
-    def _inject_img(self, carrier_img, color_deltaE=3.0):
+    def _inject_img(self, carrier_img, color_deltaE=1.5):
         # Convert images to LAB space
         #inject_lab = cv2.cvtColor(self.inject_img, cv2.COLOR_BGR2LAB)
         carrier_lab = cv2.cvtColor(carrier_img, cv2.COLOR_BGR2LAB)
@@ -156,22 +138,15 @@ class EventAttack:
         k_L = 1.0
         S_L = 1 + ((0.015 * (carrier_L - 50) ** 2) / (np.sqrt(20 + (carrier_L - 50) ** 2)))
         delta_L = k_L * S_L * color_deltaE
-        #self._show_mask_cv(injection_mask)
         
-        # Compute the texture map to alter delta_L
-        #texture_map = self._compute_texture_map(self.carrier_img)
-        #print("Created texture map!")
-        #alpha_map = self._texture_scaling(texture_map, k=0.3)
-       # print("Created alpha map!")
-        #delta_L *= alpha_map
-    
         # Create the negative and positive images
         pos_carrier_lab = carrier_lab.copy().astype(np.float32)
         neg_carrier_lab = carrier_lab.copy().astype(np.float32)
         
-        shifted_mask = self._shift_mask(injection_mask, dx=100, dy=100)
-        pos_carrier_lab[:, :, 0][injection_mask] += delta_L[injection_mask]
-        neg_carrier_lab[:, :, 0][injection_mask] -= delta_L[injection_mask]
+        scaled_mask = self._scale_mask(injection_mask, scale_factor=self.scale)
+        translated_mask = self._shift_mask(mask=scaled_mask, dx=self.dx, dy=self.dy)
+        pos_carrier_lab[:, :, 0][translated_mask] += delta_L[translated_mask]
+        neg_carrier_lab[:, :, 0][translated_mask] -= delta_L[translated_mask]
 
         pos_carrier_lab = np.clip(pos_carrier_lab, 0, 255).astype(np.uint8)
         neg_carrier_lab = np.clip(neg_carrier_lab, 0, 255).astype(np.uint8)
@@ -180,15 +155,14 @@ class EventAttack:
         pos_carrier = cv2.cvtColor(pos_carrier_lab, cv2.COLOR_LAB2BGR)
         neg_carrier = cv2.cvtColor(neg_carrier_lab, cv2.COLOR_LAB2BGR)
 
-        return pos_carrier, neg_carrier
+        return pos_carrier, neg_carrier, translated_mask
     
     # Setup functions
-    def _init_window(self, monitor_id):
+    def _init_window(self, monitor_id : int):
         if not glfw.init():
             raise RuntimeError("Failed to init GLFW")
 
-        monitor = glfw.get_primary_monitor()
-        monitor = glfw.get_monitors()[1]
+        monitor = glfw.get_monitors()[monitor_id]
         mode = glfw.get_video_mode(monitor)
 
         # Resolve width/height differences across bindings
@@ -285,24 +259,17 @@ class EventAttack:
 
         glDisable(GL_TEXTURE_2D)
 
-    def flicker(self, duration=10, black_frame_interval=100):
-        # Generate the positive and negative frames to flicker between
-        pos_frame, neg_frame = self._inject_img(self.carrier_img, color_deltaE=1.25)
-        black_frame = np.zeros((self.monitor_H, self.monitor_W, 3), dtype=np.uint8)
+    # Attack Functions
+    def _fixed_flicker(self) -> None:
+        # Extract fixed-flicker specific variables
+        fps = self.attack_method["fps"]
 
-        injection_mask = self._create_injection_mask(self.inject_img)
-        pos_tex, x0, y0, w, h = self._create_masked_texture(pos_frame, injection_mask)
-        neg_tex, _, _, _, _ = self._create_masked_texture(neg_frame, injection_mask)
+        # Generate both positive and negative frames for flicker fusion
+        pos_frame, neg_frame, mask = self._inject_img(self.carrier_img, color_deltaE=self.color_deltaE)
 
-        # Some helpers for experiments
-        original_tex, _, _ = self._load_texture_from_array(self.carrier_img)
-        black_tex, _, _ = self._load_texture_from_array(black_frame)
-        key_map = {
-            "ESC": glfw.KEY_ESCAPE,
-            "Q": glfw.KEY_Q,
-            "SPACE": glfw.KEY_SPACE,
-            "ENTER": glfw.KEY_ENTER,
-        }
+        # Generate OpenGL textures for both positive and negative frames
+        pos_tex, x0, y0, w, h = self._create_masked_texture(pos_frame, mask)
+        neg_tex, _, _, _, _ = self._create_masked_texture(neg_frame, mask)
 
         frame_count = 0
         start_time = time.perf_counter_ns()
@@ -310,26 +277,15 @@ class EventAttack:
             glClear(GL_COLOR_BUFFER_BIT)
             t = (time.perf_counter_ns() - start_time) / 1e9
             
-            if duration is not None and (t >= duration):
+            # Break if we have gone over duration
+            if self.duration is not None and (t >= self.duration):
                 break
             
-            #if black_frame_interval > 0 and frame_count % black_frame_interval == 0:
-            #    # Show black frame
-            #    self._draw_fullscreen_image(black_tex, self.monitor_W, self.monitor_H)
-            #    print(f"Black frame at frame {frame_count}")
-            #else:
-                # Normal flicker pattern
-            #    phase = int(t * self.fps) % 2
-            #    tex_id = pos_tex if phase == 0 else neg_tex
-            #    self._draw_masked_region(tex_id, x0, y0, w, h)
-            
-            phase = int(t * self.fps) % 2
+            # Determine if we will display the positive or negative frame
+            phase = int(t * fps) % 2
 
             # Flash between positive and negative frames
             tex_id = pos_tex if phase == 0 else neg_tex
-            #if frame_count % 10 == 0:
-            #   self._draw_fullscreen_image(black_tex, self.monitor_W, self.monitor_H)
-            #   continue
             self._draw_masked_region(tex_id, x0, y0, w, h)
 
             glfw.swap_buffers(self.window)
@@ -338,3 +294,121 @@ class EventAttack:
             frame_count += 1
 
         glfw.terminate()
+
+
+    def _lfm_flicker(self) -> None:
+        # Extract LFM-specific parameters
+        start_freq = self.attack_method["start_freq"]
+        end_freq = self.attack_method["end_freq"]
+        sweep_duration = self.attack_method["sweep_duration"]
+        reverse_sweep = self.attack_method["reverse_sweep"]
+
+        # Generate both positive and negative frames for flicker fusion
+        pos_frame, neg_frame, mask = self._inject_img(self.carrier_img, color_deltaE=self.color_deltaE)
+
+        # Generate OpenGL textures for both positive and negative frames
+        pos_tex, x0, y0, w, h = self._create_masked_texture(pos_frame, mask)
+        neg_tex, _, _, _, _ = self._create_masked_texture(neg_frame, mask)
+
+        frame_count = 0
+        start_time = time.perf_counter_ns()
+        while not glfw.window_should_close(self.window):
+            glClear(GL_COLOR_BUFFER_BIT)
+            t = (time.perf_counter_ns() - start_time) / 1e9
+            
+            # Break if we have gone over duration
+            if self.duration is not None and (t >= self.duration):
+                break
+            
+            phase = min((t % sweep_duration) / sweep_duration, 1.0)
+            if reverse_sweep:
+                if phase > 0.5:
+                    phase = 1.0 - (phase - 0.5) * 2
+                else:
+                    phase = phase * 2
+
+            # Compute instantaneous frequency
+            current_freq = start_freq + (end_freq - start_freq) * phase
+            current_period = 1.0 / current_freq
+            local_phase = (t % current_period) / current_period
+            
+            tex_id = pos_tex if local_phase < 0.5 else neg_tex
+            self._draw_masked_region(tex_id, x0, y0, w, h)
+
+
+            glfw.swap_buffers(self.window)
+            glfw.poll_events()
+
+            frame_count += 1
+
+        glfw.terminate()
+
+
+    def _contrast_injection(self) -> None:
+        # Extract Contrast Injection-specifc parameters
+        injection_period = self.attack_method["injection_period"]
+        frame_dur = 1.0 / float(self.fps)
+
+        # Generate positive and negative frames
+        pos_frame, neg_frame, mask = self._inject_img(self.carrier_img, color_deltaE=self.color_deltaE)
+        
+        # Generate black frame and normal frame for high contrast
+        black_frame = np.zeros((self.monitor_H, self.monitor_W, 3), dtype=np.uint8)
+
+        # Generate OpenGL textures for both positive and negative frames
+        black_tex, _, _ = self._load_texture_from_array(black_frame)
+        pos_tex, x0, y0, w, h = self._create_masked_texture(pos_frame, mask)
+        neg_tex, _, _, _, _ = self._create_masked_texture(neg_frame, mask)
+        normal_tex, _, _ = self._load_texture_from_array(self.carrier_img)
+
+
+        start_time = time.perf_counter()
+        while not glfw.window_should_close(self.window):
+            glClear(GL_COLOR_BUFFER_BIT)
+            t = time.perf_counter() - start_time
+
+            # stop after requested duration, if any
+            if self.duration is not None and t >= self.duration:
+                break
+
+            # Where are we in the injection cycle?
+            cycle_t = t % injection_period
+
+            # Sequence:
+            # 0 .. frame_dur                -> black
+            # frame_dur .. 2*frame_dur     -> pos (masked)
+            # 2*frame_dur .. 3*frame_dur   -> neg (masked)
+            # else                         -> normal (full)
+            if cycle_t < frame_dur:
+                # single black frame
+                self._draw_fullscreen_image(black_tex, self.monitor_W, self.monitor_H)
+            elif cycle_t < 2 * frame_dur:
+                # single positive (masked)
+                self._draw_masked_region(pos_tex, x0, y0, w, h)
+            elif cycle_t < 3 * frame_dur:
+                # single negative (masked)
+                self._draw_masked_region(neg_tex, x0, y0, w, h)
+            else:
+                # normal full image the rest of the cycle
+                self._draw_fullscreen_image(normal_tex, self.monitor_W, self.monitor_H)
+
+            glfw.swap_buffers(self.window)
+            glfw.poll_events()
+
+        glfw.terminate()
+
+
+    def flicker(self) -> None:
+        # Determine which attack method we should use
+        match self.attack_method["type"]:
+            # Fixed frequency: flicker image at constant frequency
+            case "fixed":
+                self._fixed_flicker()
+
+            # Variable frequency: flicker image at LFM between [start_freq, end_freq]
+            case "lfm":
+                self._lfm_flicker()
+
+            # Contrast injection: inject a black image and then attack image at certain duration
+            case "contrast_injection":
+                self._contrast_injection()

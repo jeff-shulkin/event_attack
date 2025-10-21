@@ -1,21 +1,13 @@
 from event_attack import EventAttack
+import pathlib
 import argparse
 
 
 def main(args):
-    injected_image_filename = args.injected_image_filename
-    carrier_image_filename = args.carrier_image_filename
-    flicker_fps = args.fps
-    monitor_id = args.monitor_id
+    attack_config_path = args.config
 
     print("Initializing attack...")
-    attack = EventAttack(
-        monitor_id=monitor_id,
-        inject_img_path=injected_image_filename,
-        carrier_img_path=carrier_image_filename,
-        attack_method="linear",
-        fps=flicker_fps
-    )
+    attack = EventAttack(attack_config_path=attack_config_path)
     print("Finished setting up attack.")
 
     # Start flickering with a given image
@@ -25,9 +17,6 @@ def main(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Attack test argument parser")
-    parser.add_argument("-i", "--injected_image_filename", type=str, required=True)
-    parser.add_argument("-c", "--carrier_image_filename", type=str, required=True)
-    parser.add_argument("-f", "--fps", type=int, required=True)
-    parser.add_argument("-m", "--monitor_id", type=int, required=True)
+    parser.add_argument("-c", "--config", type=pathlib.Path)
     args = parser.parse_args()
     main(args)
