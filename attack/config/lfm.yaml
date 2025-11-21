@@ -1,18 +1,25 @@
 carrier_image: C:/Users/Jeff/Pictures/mr_frog.jpg # Path to carrier image
 injected_image: C:/Users/Jeff/Pictures/stopsign.png # Path to injected/attack image
 
-color_deltaE: 1.5 # Units: L space difference
+color_deltaE: 10.0 # Units: L space difference
 duration: 10.0 # Units: seconds
 
+# Spatial offsets
 dx: 0.0 # Units: Pixels
 dy: 0.0 # Units: Pixels
 scale: 1.0 # Units: None
+
+# Temporal offsets
+vibration_config:
+  amp: 10000
+  freq: 1
+  angle: 0
 
 monitor_id: 0 # Monitor choice (primary or secondary)
 
 attack_method:
   type: lfm # Choices: [fixed, lfm, contrast_injection]
-  start_freq: 1.0 # Units: Hz
-  end_freq: 60.0 # Units: Hz
-  sweep_duration: 5.0 # Units: seconds
+  start_freq: 60.0 # Units: Hz
+  end_freq: 50.0 # Units: Hz
+  sweep_duration: 0.5 # Units: seconds
   reverse_sweep: False # Units: boolean (True/False)

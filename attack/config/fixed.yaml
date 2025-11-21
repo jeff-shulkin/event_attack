@@ -1,15 +1,32 @@
-carrier_image: C:/Users/Jeff/Pictures/mr_frog.jpg # Path to carrier image
-injected_image: C:/Users/Jeff/Pictures/stopsign.png # Path to injected/attack image
+carrier_image: C:/Users/Jeff/Pictures/watch_ad2.jpg
+injected_image: C:/Users/Jeff/Documents/Research/event_attack/injection_photos/hidden_images/stopsign.png # Path to injected/attack image
 
-color_deltaE: 1.5 # Units: L space difference
-duration: 10.0 # Units: seconds
+duration: 20.0 # Units: seconds
 
-dx: 0.0 # Units: Pixels
-dy: 0.0 # Units: Pixels
+# Injection Type:
+injection_config:
+  injection_type: "lab" # Choices: [log, lab]
+  color_deltaE: 15.0 # Units: L space difference
+  mask_pattern: "full" # Choices: [full, edges]
+  drawing_method: "masked_region" # Choices: [fullscreen, masked_region]
+
+#injection_config:
+#  injection_type: "log"
+#  contrast: 1.0
+
+# Spatial offset
+dx: 0 # Units: Pixels
+dy: 0 # Units: Pixels
 scale: 1.0 # Units: None
 
-monitor_id: 0 # Monitor choice (primary or secondary)
+# Temporal offset
+vibration_config:
+  amp: 0 # Units: Pixels
+  freq: 0 # Units: Hz
+  angle: 0 # Units: degrees
+
+monitor_id: 1 # Monitor choice (primary or secondary)
 
 attack_method: # Choices: [fixed, lfm, contrast_injection]
   type: fixed
-  fps: 60.0 # Units: Hz
+  fps: 30.0 # Units: Hz

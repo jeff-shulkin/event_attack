@@ -1,14 +1,19 @@
+import time
+import threading
+import queue
+import pathlib
+
 import numpy as np
 import scipy as sp
-import imutils
-import glfw
 import cv2
-from PIL import Image
-from OpenGL.GL import *
-import pathlib
-import time
 import yaml
 from yaml.loader import FullLoader
+from PIL import Image
+import matplotlib.pyplot as plt
+
+import glfw
+from OpenGL.GL import *
+
 from skimage.feature import graycomatrix, graycoprops
 from skimage.util.shape import view_as_windows
 
@@ -18,23 +23,30 @@ class EventAttack:
         print(self.attack_config)
 
         # Initialize global settings
-        self.color_deltaE = self.attack_config["color_deltaE"]
         self.duration = self.attack_config["duration"]
+        
+        # Spatial settings
         self.dx = self.attack_config["dx"]
         self.dy = self.attack_config["dy"]
         self.scale = self.attack_config["scale"]
+        
+        # Injection settings
+        self.injection_config = self.attack_config["injection_config"]
+
+        # Temporal vibration settings
+        self.vibration_config = self.attack_config["vibration_config"]
         self.monitor_id = self.attack_config["monitor_id"]
         self.attack_method = self.attack_config["attack_method"]
 
         # Initialize OpenGL window
         self.window, self.W, self.H = self._init_window(monitor_id=self.monitor_id)
-        
+
         # Read in both the carrier and attack images
         self.inject_img = cv2.imread(self.attack_config["injected_image"], cv2.IMREAD_UNCHANGED)
         self.carrier_img = cv2.imread(self.attack_config["carrier_image"], cv2.IMREAD_UNCHANGED)
         self.inject_img = cv2.resize(self.inject_img, (self.monitor_W, self.monitor_H), interpolation=cv2.INTER_LINEAR)
         self.carrier_img = cv2.resize(self.carrier_img, (self.monitor_W, self.monitor_H), interpolation=cv2.INTER_LINEAR)
-    
+
     # Parse YAML config file
     def _parse_attack_config(self, config_path : pathlib.Path):
         with open(config_path, 'r') as stream:
@@ -70,8 +82,11 @@ class EventAttack:
         """Shift a boolean mask by (dx, dy) with zero padding."""
         h, w = mask.shape
         shifted = np.zeros_like(mask)
-        
+
         src_x0 = max(0, -dx)
+
+
+
         src_x1 = min(w, w - dx)
         src_y0 = max(0, -dy)
         src_y1 = min(h, h - dy)
@@ -116,47 +131,296 @@ class EventAttack:
 
         scaled[y0:y1, x0:x1] = resized[resized_y0:resized_y1, resized_x0:resized_x1]
         return scaled > 0
-    
-    def _show_mask_cv(self, mask, winname="mask"):
+
+    def _show_mask_cv(self, mask, winname="mask", key_time=0):
         # mask: boolean HxW
         vis = (mask.astype(np.uint8) * 255)  # 0 or 255
         cv2.imshow(winname, vis)
-        cv2.waitKey(0)
+        cv2.waitKey(key_time)
         cv2.destroyWindow(winname)
 
-    # Inject attack img into carrier image
-    def _inject_img(self, carrier_img, color_deltaE=1.5):
+    def _compute_brightness_gradient(self, gray_frame, ksize=3):
+        grad_x = cv2.Sobel(gray_frame, cv2.CV_64F, 1, 0, ksize=ksize)
+        grad_y = cv2.Sobel(gray_frame, cv2.CV_64F, 0, 1, ksize=ksize)
+
+        mag = np.hypot(grad_x, grad_y)
+        mag = mag / mag.max()
+
+        nx = grad_x / np.max(grad_x)
+        ny = grad_y / np.max(grad_y)
+
+        return mag.astype(np.float32), nx.astype(np.float32), ny.astype(np.float32)
+
+    def _create_edge_gradients(self, inject_mask, color_deltaE, scale_area=3.0, edge_threshold=0.05, ksize=3):
+        # Convert boolean mask to uint8
+        mask_uint8 = (inject_mask.astype(np.uint8) * 255)
+
+        # Dilate slightly to include some border
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (ksize, ksize))
+        dilated_mask = cv2.dilate(mask_uint8, kernel, iterations=1)
+
+        # Invert mask for distance transform (distance from outside the mask)
+        inverted_mask = cv2.bitwise_not(dilated_mask)
+
+        # Compute distance transform
+        distance = cv2.distanceTransform(inverted_mask, distanceType=cv2.DIST_L2, maskSize=5)
+        distance_clipped = np.clip(distance, 0, scale_area)
+
+        # Normalize to [0,1] and invert (max at boundary)
+        distance_norm = 1.0 - (distance_clipped / scale_area)
+
+        # Apply color delta scaling
+        delta_map_L = color_deltaE * distance_norm.astype(np.float32)
+
+        # Optional: normals can be approximated by Sobel of mask
+        grad_x = cv2.Sobel(mask_uint8.astype(np.float32), cv2.CV_32F, 1, 0, ksize=3)
+        grad_y = cv2.Sobel(mask_uint8.astype(np.float32), cv2.CV_32F, 0, 1, ksize=3)
+        mag_n = np.hypot(grad_x, grad_y) + 1e-6
+        nx = grad_x / mag_n
+        ny = grad_y / mag_n
+
+        return delta_map_L, (nx, ny, mag_n)
+
+    def _visualize_gradient(self, delta_map_L, normals_tuple, spacing=20, scale=5.0):
+        nx, ny, mag_n = normals_tuple
+        H,W = delta_map_L.shape
+
+        plt.figure(figsize=(10,8))
+        plt.imshow(delta_map_L, cmap='viridis')
+        plt.colorbar(label='delta L (L* units)')
+        plt.title('Delta Lightness Map')
+
+        # quiver overlay: downsample for clarity
+        ys = np.arange(0, H, spacing)
+        xs = np.arange(0, W, spacing)
+        X, Y = np.meshgrid(xs, ys)
+        U = nx[Y, X]
+        V = -ny[Y, X]   # flip y for plotting coordinate system
+        M = mag_n[Y, X]
+        plt.quiver(X, Y, U*scale*M, V*scale*M, M, cmap='coolwarm', scale=1, width=0.003)
+        plt.gca().invert_yaxis()
+        plt.show()
+
+    def _vibrate_mask(self, mask, t):
+        # Extract vibration-specific settings:
+        vib_amp = self.vibration_config["amp"]
+        vib_freq = self.vibration_config["freq"]
+        vib_angle = self.vibration_config["angle"]
+
+        print(f"vib_amp: {vib_amp}")
+        print(f"vib_freq: {vib_freq}")
+        print(f"vib_angle: {vib_angle}")
+
+        if vib_freq in [0, None]:
+            return mask
+        
+        if mask.dtype == bool:
+            mask = mask.astype(np.uint8) * 255
+        
+        # Compute pixel displacement
+        theta = np.deg2rad(vib_angle)
+        vib_dx = vib_amp * np.cos(theta) * np.sin(2 * np.pi * vib_freq * t)
+        vib_dy = vib_amp * np.sin(theta) * np.sin(2 * np.pi * vib_freq * t)
+
+        print(f"vib_dx: {vib_dx}")
+        print(f"vib_dy: {vib_dy}")
+        
+        # Shift only the mask
+        M = np.float32([[1, 0, vib_dx], [0, 1, vib_dy]])
+        shifted_mask = cv2.warpAffine(mask, M, (mask.shape[1], mask.shape[0]),
+                                    flags=cv2.INTER_NEAREST, borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+        return shifted_mask > 0
+
+    def _srgb_to_linear(self, srgb):
+        # srgb assumed in [0,1] float
+        a = 0.055
+        linear = np.where(srgb <= 0.04045,
+                        srgb / 12.92,
+                        ((srgb + a) / (1.0 + a)) ** 2.4)
+        return linear
+
+    def _rgb_to_luminance_linear(self, img_bgr_uint8):
+        """
+        Input: img_bgr_uint8 -- OpenCV image in BGR uint8 (0..255)
+        Returns: luminance_linear -- float32 array, linear irradiance (proportional to I)
+        """
+        # convert to float [0,1]
+        img = img_bgr_uint8.astype(np.float32) / 255.0
+
+        # BGR -> RGB ordering for formula weights
+        b = img[..., 0]
+        g = img[..., 1]
+        r = img[..., 2]
+
+        # undo sRGB gamma to get linear intensities for each channel
+        r_lin = self._srgb_to_linear(r)
+        g_lin = self._srgb_to_linear(g)
+        b_lin = self._srgb_to_linear(b)
+
+        # luminance (Rec. 709 / BT.601-like weights; match your camera/model)
+        # Y = 0.2126 R + 0.7152 G + 0.0722 B  (Rec.709)
+        # Or use ITU-R BT.601: Y = 0.299 R + 0.587 G + 0.114 B
+        Y = 0.2126 * r_lin + 0.7152 * g_lin + 0.0722 * b_lin
+
+        return Y.astype(np.float32)
+
+    def _log_intensity(self, img_bgr_uint8, eps=1e-6, use_natural_log=True):
+        Y = self._rgb_to_luminance_linear(img_bgr_uint8)
+        Y = np.maximum(Y, eps)
+        if use_natural_log:
+            return np.log(Y)
+        else:
+            return np.log10(Y)
+
+    def _inject_img_lab(self, carrier_img, color_deltaE=1.5, t=0):
+        # Grab mask pattern
+        mask_pattern = self.injection_config["mask_pattern"]
+
         # Convert images to LAB space
-        #inject_lab = cv2.cvtColor(self.inject_img, cv2.COLOR_BGR2LAB)
         carrier_lab = cv2.cvtColor(carrier_img, cv2.COLOR_BGR2LAB)
 
         # Create injection mask to embed into carrier image
         injection_mask = self._create_injection_mask(self.inject_img)
+
+        # Convert boolean mask to uint8
+        im_uint8 = (injection_mask.astype(np.uint8) * 255)
+            
+        # Find all contours (outer + inner)
+        contours, _ = cv2.findContours(im_uint8, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+
+        # Draw contours onto a single-channel mask
+        contour_mask = np.zeros_like(im_uint8)
+        cv2.drawContours(contour_mask, contours, -1, color=255, thickness=5)
+
+        # Convert back to boolean
+        injection_mask = contour_mask > 0 if mask_pattern == "edges" else injection_mask > 0
         
         # Calculate the lightness change for the color difference color_deltaE
         carrier_L = carrier_lab[:, :, 0].astype(np.float32)
         k_L = 1.0
         S_L = 1 + ((0.015 * (carrier_L - 50) ** 2) / (np.sqrt(20 + (carrier_L - 50) ** 2)))
         delta_L = k_L * S_L * color_deltaE
+
+        # Inject lightness change of 1-3 units along b* space
         
+        # Spatial scaling/shifting
+        scaled_mask = self._scale_mask(injection_mask, scale_factor=self.scale)
+        translated_mask = self._shift_mask(mask=scaled_mask, dx=self.dx, dy=self.dy)
+
+        # Vibrate mask
+        total_mask = self._vibrate_mask(mask=translated_mask, t=t)
+        delta_map_L, (nx, ny, mag_n) = self._create_edge_gradients(
+            total_mask,
+            color_deltaE=color_deltaE,
+            scale_area=6.0,          # falloff radius (pixels)
+            edge_threshold=0.04,     # edge detection threshold
+            ksize=3
+        )
+
+        #delta_L *= (1 + 0.3 * delta_map_L / np.max(np.abs(delta_map_L) + 1e-6))
+
         # Create the negative and positive images
         pos_carrier_lab = carrier_lab.copy().astype(np.float32)
         neg_carrier_lab = carrier_lab.copy().astype(np.float32)
-        
-        scaled_mask = self._scale_mask(injection_mask, scale_factor=self.scale)
-        translated_mask = self._shift_mask(mask=scaled_mask, dx=self.dx, dy=self.dy)
-        pos_carrier_lab[:, :, 0][translated_mask] += delta_L[translated_mask]
-        neg_carrier_lab[:, :, 0][translated_mask] -= delta_L[translated_mask]
+
+        # Apply delta only to masked regions, leave others unchanged
+        mask_indices = np.where(total_mask)
+        pos_carrier_lab[:, :, 0][mask_indices] = np.clip(
+            pos_carrier_lab[:, :, 0][mask_indices] + delta_L[mask_indices], 0, 255
+        )
+        neg_carrier_lab[:, :, 0][mask_indices] = np.clip(
+            neg_carrier_lab[:, :, 0][mask_indices] - delta_L[mask_indices], 0, 255
+        )
+
+        # Apply constant 1 unit difference among b* space
+        pos_carrier_lab[:, :, 2][mask_indices] = np.clip(
+            pos_carrier_lab[:, :, 2][mask_indices] + 0, 0, 255
+        )
+        neg_carrier_lab[:, :, 2][mask_indices] = np.clip(
+            neg_carrier_lab[:, :, 2][mask_indices] - 0, 0, 255
+        )
 
         pos_carrier_lab = np.clip(pos_carrier_lab, 0, 255).astype(np.uint8)
         neg_carrier_lab = np.clip(neg_carrier_lab, 0, 255).astype(np.uint8)
 
         # Convert both images back to RGB space
-        pos_carrier = cv2.cvtColor(pos_carrier_lab, cv2.COLOR_LAB2BGR)
-        neg_carrier = cv2.cvtColor(neg_carrier_lab, cv2.COLOR_LAB2BGR)
+        pos_carrier = cv2.cvtColor(pos_carrier_lab, cv2.COLOR_LAB2RGB)
+        neg_carrier = cv2.cvtColor(neg_carrier_lab, cv2.COLOR_LAB2RGB)
 
-        return pos_carrier, neg_carrier, translated_mask
+        return pos_carrier, neg_carrier, total_mask
     
+    def _inject_img_log(self, carrier_img, contrast, t=0):
+        # Convert images to log(I) space
+        carrier_intensity = self._log_intensity(carrier_img, eps=1e-6, use_natural_log=True)
+        inject_intensity = self._log_intensity(self.inject_img, eps=1e-6, use_natural_log=True)
+
+        print(f"Max carrier intensity: {np.max(carrier_intensity)}")
+        print(f"Max injected intensity: {np.max(inject_intensity)}")
+
+        # Create injection mask
+        injection_mask = self._create_injection_mask(self.inject_img)
+
+        # Convert boolean mask to uint8
+        im_uint8 = (injection_mask.astype(np.uint8) * 255)
+
+        # Find all contours (outer + inner)
+        contours, _ = cv2.findContours(im_uint8, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+
+        # Draw contours onto a single-channel mask
+        contour_mask = np.zeros_like(im_uint8)
+        cv2.drawContours(contour_mask, contours, -1, color=255, thickness=2)
+
+        # Convert back to boolean
+        injection_mask = contour_mask > 0
+
+        # Spatial scaling/shifting
+        scaled_mask = self._scale_mask(injection_mask, scale_factor=self.scale)
+        translated_mask = self._shift_mask(mask=scaled_mask, dx=self.dx, dy=self.dy)
+
+        # Compute logI delta
+        delta_logI = np.log10(1.0 + contrast)
+        print(f"delta_logI: {delta_logI}")
+        
+        # Vibrating mask:
+        total_mask = self._vibrate_mask(mask=translated_mask, t=t)
+
+        # Create the negative and positive images
+        pos_carrier_I = carrier_intensity.copy().astype(np.float32)
+        neg_carrier_I = carrier_intensity.copy().astype(np.float32)
+
+        # Apply delta only to masked regions, leave others unchanged
+        mask_indices = np.where(total_mask)
+        pos_carrier_I[mask_indices] += delta_logI
+        neg_carrier_I[mask_indices] -= delta_logI
+
+        pos_linear = 10 ** pos_carrier_I
+        neg_linear = 10 ** neg_carrier_I
+
+        pos_linear_uint8 = np.clip(pos_linear * 255, 0, 255).astype(np.uint8)
+        neg_linear_uint8 = np.clip(neg_linear * 255, 0, 255).astype(np.uint8)
+
+        # Convert both images back to RGB space
+        pos_carrier = cv2.cvtColor(pos_linear_uint8, cv2.COLOR_GRAY2BGR)
+        neg_carrier = cv2.cvtColor(neg_linear_uint8, cv2.COLOR_GRAY2BGR)
+
+        #cv2.imshow("Positive carrier log", pos_carrier)
+        #cv2.waitKey(0)
+
+        #cv2.imshow("Negative carrier log", neg_carrier)
+        #cv2.waitKey(0)
+
+        return pos_carrier, neg_carrier, total_mask
+
+    def _inject_img(self, carrier_img, t=0):
+        mode = self.injection_config["injection_type"]
+        if mode == "lab":
+            color_deltaE = self.injection_config["color_deltaE"]
+            return self._inject_img_lab(carrier_img, color_deltaE, t)
+        
+        elif mode == "log":
+            contrast = self.injection_config["contrast"]
+            return self._inject_img_log(carrier_img, contrast)
+
     # Setup functions
     def _init_window(self, monitor_id : int):
         if not glfw.init():
@@ -168,6 +432,7 @@ class EventAttack:
         # Resolve width/height differences across bindings
         try:
             self.monitor_W, self.monitor_H = mode.size.width, mode.size.height
+            #self.monitor_W, self.monitor_H = 1920, 1080
         except AttributeError:
             self.monitor_W, self.monitor_H = getattr(mode, "width", 800), getattr(mode, "height", 600)
 
@@ -260,20 +525,81 @@ class EventAttack:
         glDisable(GL_TEXTURE_2D)
 
     # Attack Functions
+    def _precompute_vibration_textures(self, pos_frame, neg_frame, mask, draw_pattern):
+        """
+        Precompute textures for the entire vibration cycle.
+        Returns list of tuples: (pos_tex_info, neg_tex_info) for each time step.
+        """
+        def _apply_mask_to_frame(attack_frame, mask, carrier_frame):
+            """
+            Apply the vibrating mask to combine attack frame with carrier frame.
+            Where mask is True, use attack_frame; where False, use carrier_frame.
+            """
+            result = carrier_frame.copy()
+            result[mask] = attack_frame[mask]
+            return result
+        
+        vib_freq = self.vibration_config["freq"]
+        vib_amp = self.vibration_config["amp"]
+        fps = self.attack_method["fps"]
+        x0 = y0 = w = h = None
+        textures = []
+
+        # If no vibration, return single frame pair
+        if vib_freq == 0 or vib_amp == 0:
+            if draw_pattern == "fullscreen":
+                pos_tex, w, h = self._load_texture_from_array(pos_frame)
+                neg_tex, _, _ = self._load_texture_from_array(neg_frame)
+                textures.append((pos_tex, neg_tex))
+            else:
+                pos_tex, x0, y0, w, h = self._create_masked_texture(pos_frame, mask)
+                neg_tex, _, _, _, _ = self._create_masked_texture(neg_frame, mask)
+
+            textures.append((pos_tex, neg_tex))
+            return textures, x0, y0, w, h
+
+        # Compute number of frames per vibration period
+        period = 1.0 / vib_freq
+        num_frames = int(np.ceil(period * fps))
+        print(f"Number of vibration frames: {num_frames}")
+
+        for i in range(num_frames):
+            t = i / fps
+            vib_mask = self._vibrate_mask(mask, t)
+
+            if draw_pattern == "fullscreen":
+                # Apply mask to create complete frames
+                pos_complete = _apply_mask_to_frame(pos_frame, vib_mask, self.carrier_img)
+                neg_complete = _apply_mask_to_frame(neg_frame, vib_mask, self.carrier_img)
+            
+                pos_full_tex, w, h = self._load_texture_from_array(pos_complete)
+                neg_full_tex, _, _ = self._load_texture_from_array(neg_complete)
+                textures.append((pos_full_tex, neg_full_tex))
+
+            elif draw_pattern == "masked_region":
+                pos_masked_tex, x0, y0, w, h = self._create_masked_texture(pos_frame, vib_mask)
+                neg_masked_tex, _, _, _, _ = self._create_masked_texture(neg_frame, vib_mask)
+                textures.append((pos_masked_tex, neg_masked_tex))
+
+        return textures, x0, y0, w, h
+
     def _fixed_flicker(self) -> None:
+        # Extract drawing method
+        drawing_method = self.injection_config["drawing_method"]
+
         # Extract fixed-flicker specific variables
         fps = self.attack_method["fps"]
 
         # Generate both positive and negative frames for flicker fusion
-        pos_frame, neg_frame, mask = self._inject_img(self.carrier_img, color_deltaE=self.color_deltaE)
+        pos_frame, neg_frame, base_mask = self._inject_img(self.carrier_img)
 
-        # Generate OpenGL textures for both positive and negative frames
-        pos_tex, x0, y0, w, h = self._create_masked_texture(pos_frame, mask)
-        neg_tex, _, _, _, _ = self._create_masked_texture(neg_frame, mask)
+        # Precompute complete vibrating frames
+        texture_sequence, x0, y0, _, _ = self._precompute_vibration_textures(pos_frame, neg_frame, base_mask, drawing_method)
 
-        frame_count = 0
+        num_vibration_frames = len(texture_sequence)
         start_time = time.perf_counter_ns()
         while not glfw.window_should_close(self.window):
+            t0 = time.perf_counter_ns()
             glClear(GL_COLOR_BUFFER_BIT)
             t = (time.perf_counter_ns() - start_time) / 1e9
             
@@ -281,20 +607,38 @@ class EventAttack:
             if self.duration is not None and (t >= self.duration):
                 break
             
-            # Determine if we will display the positive or negative frame
+            # Get the current vibration frame
+            vib_phase = (t * self.vibration_config["freq"]) % 1.0
+            vib_index = int(vib_phase * num_vibration_frames) % num_vibration_frames
+            pos_full_tex, neg_full_tex = texture_sequence[vib_index]
+            
             phase = int(t * fps) % 2
 
-            # Flash between positive and negative frames
-            tex_id = pos_tex if phase == 0 else neg_tex
-            self._draw_masked_region(tex_id, x0, y0, w, h)
+            # Flash between positive and negative complete frames
+            tex_id = pos_full_tex if phase == 0 else neg_full_tex
+
+            match drawing_method:
+                case "fullscreen":
+                    self._draw_fullscreen_image(tex_id, self.monitor_W, self.monitor_H)
+            
+                case "masked_region":
+                    self._draw_masked_region(tex_id, x0, y0, self.monitor_W, self.monitor_H)
 
             glfw.swap_buffers(self.window)
             glfw.poll_events()
+            t1 = time.perf_counter_ns()
+            print(f"Approximate FPS: {1.0 / (float(t1 - t0) / 1e9)}")
 
-            frame_count += 1
+        # Cleanup
+        try:
+            glfw.destroy_window(self.window)
+            glfw.terminate()
+            for pos_tex, neg_tex in texture_sequence:
+                glDeleteTextures([pos_tex, neg_tex])
+        except Exception:
+            pass
 
         glfw.terminate()
-
 
     def _lfm_flicker(self) -> None:
         # Extract LFM-specific parameters
@@ -342,6 +686,8 @@ class EventAttack:
             frame_count += 1
 
         glfw.terminate()
+
+        cv2.destroyAllWindows()
 
 
     def _contrast_injection(self) -> None:
@@ -398,6 +744,55 @@ class EventAttack:
 
         glfw.terminate()
 
+    def _vid_reader(self, frame_queue, original_video_path):
+        vid = cv2.VideoCapture(original_video_path)
+
+        while True:
+            ret, frame = vid.read()
+            if not ret:
+                print("Finished reading video. Killing thread.")
+                break
+    
+            if frame_queue.full():
+                frame_queue.get()
+
+            # Obtain positive and negative injected images
+            pos_frame, neg_frame, mask = self._inject_img(frame, color_deltaE=self.color_deltaE)
+
+            # Generate OpenGL textures for our altered frames
+            pos_info = self._create_masked_texture(pos_frame, mask)
+            neg_info = self._create_masked_texture(neg_frame, mask)
+                
+            # Put both the positive and negative frames on the queue alongside drawing regions
+            frame_queue.put(pos_info)
+            frame_queue.put(neg_info)
+
+        vid.release()
+        frame_queue.put(None)
+
+
+    def _display_writer(self, frame_queue):
+        prev_tex_id = None
+        while True:
+            curr_tex_id, x0, y0, w, h = frame_queue.get()
+            self._draw_masked_region(curr_tex_id, x0, y0, w, h)
+            prev_tex_id = curr_tex_id
+
+    def _video_injection(self) -> None:
+        # Extract video-injection specific variables
+
+        vid = cv2.VideoCapture()
+        while True:
+            ret, frame = vid.read()
+            if not ret:
+                break
+
+            # Obtain positive and negative injected images
+            pos_frame, neg_frame, mask = self._inject_img(frame, color_deltaE=self.color_deltaE)
+
+            # Generate OpenGL textures for our altered frames
+            pos_info = self._create_masked_texture(pos_frame, mask)
+            neg_info = self._create_masked_texture(neg_frame, mask)            
 
     def flicker(self) -> None:
         # Determine which attack method we should use
@@ -413,3 +808,7 @@ class EventAttack:
             # Contrast injection: inject a black image and then attack image at certain duration
             case "contrast_injection":
                 self._contrast_injection()
+
+            # Video injection: translate an mp4 video into flicker pattern
+            case "video_injection":
+                self._video_injection()

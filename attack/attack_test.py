@@ -1,7 +1,7 @@
 from event_attack import EventAttack
 import pathlib
 import argparse
-
+import time
 
 def main(args):
     attack_config_path = args.config
@@ -11,6 +11,7 @@ def main(args):
     print("Finished setting up attack.")
 
     # Start flickering with a given image
+    time.sleep(5)
     print("Starting image flicker...")
     attack.flicker()
     print("Ending image flicker...")
