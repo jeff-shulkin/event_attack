@@ -2,6 +2,7 @@ import time
 import threading
 import queue
 import pathlib
+import sys
 
 import numpy as np
 import scipy as sp
@@ -474,11 +475,13 @@ class EventAttack:
         # Resolve width/height differences across bindings
         try:
             self.monitor_W, self.monitor_H = mode.size.width, mode.size.height
-            #self.monitor_W, self.monitor_H = 1920, 1080
+
+
         except AttributeError:
             self.monitor_W, self.monitor_H = getattr(mode, "width", 800), getattr(mode, "height", 600)
 
-        print(f"Monitor resolution: {self.monitor_W}x{self.monitor_H}, refresh rate: {getattr(mode, 'refresh_rate', 60)} Hz")
+        self.monitor_fps = getattr(mode, 'refresh_rate', 60)
+        print(f"Monitor resolution: {self.monitor_W}x{self.monitor_H}, refresh rate: {self.monitor_fps} Hz")
 
         # Fullscreen window
         glfw.window_hint(glfw.DECORATED, glfw.FALSE)
@@ -578,20 +581,6 @@ class EventAttack:
         glBindVertexArray(self.vao)
         glDrawArrays(GL_TRIANGLES, 0, 6)
 
-    def _draw_masked_region(self, tex_id, x0, y0, w, h):
-        glEnable(GL_TEXTURE_2D)
-        glBindTexture(GL_TEXTURE_2D, tex_id)
-        glColor4f(1.0, 1.0, 1.0, 1.0)
-
-        glBegin(GL_QUADS)
-        glTexCoord2f(0, 0); glVertex2f(x0, y0)
-        glTexCoord2f(1, 0); glVertex2f(x0 + w, y0)
-        glTexCoord2f(1, 1); glVertex2f(x0 + w, y0 + h)
-        glTexCoord2f(0, 1); glVertex2f(x0, y0 + h)
-        glEnd()
-
-        glDisable(GL_TEXTURE_2D)
-
     def _draw_texture(self, tex_id):
         glClear(GL_COLOR_BUFFER_BIT)
 
@@ -602,8 +591,9 @@ class EventAttack:
 
         glBindVertexArray(self.vao)
         glDrawArrays(GL_TRIANGLES, 0, 6)
+
     # Attack Functions
-    def _precompute_vibration_textures(self, pos_frame, neg_frame, mask):
+    def _precompute_vibration_textures(self, pos_frame, neg_frame, mask, fps):
         """
         Precompute textures for the entire vibration cycle.
         Returns list of tuples: (pos_tex_info, neg_tex_info) for each time step.
@@ -619,7 +609,7 @@ class EventAttack:
         
         vib_freq = self.vibration_config["freq"]
         vib_amp = self.vibration_config["amp"]
-        fps = self.attack_method["fps"]
+        fps = fps if fps is None else self.monitor_fps
         x0 = y0 = w = h = None
         textures = []
 
@@ -656,8 +646,8 @@ class EventAttack:
         pos_frame, neg_frame, base_mask = self._inject_img(self.carrier_img)
 
         # Precompute textures for vibration cycle
-        texture_sequence, x0, y0, w, h = self._precompute_vibration_textures(
-            pos_frame, neg_frame, base_mask
+        texture_sequence, _, _, _, _ = self._precompute_vibration_textures(
+            pos_frame, neg_frame, base_mask, fps
         )
 
         num_vibration_frames = len(texture_sequence)
@@ -691,56 +681,69 @@ class EventAttack:
             glfw.destroy_window(self.window)
             glfw.terminate()
         except Exception:
-            pass
+            print("Failed to delete all textures")
+            sys.exit(1)
 
     def _lfm_flicker(self) -> None:
-        # Extract LFM-specific parameters
         start_freq = self.attack_method["start_freq"]
         end_freq = self.attack_method["end_freq"]
         sweep_duration = self.attack_method["sweep_duration"]
         reverse_sweep = self.attack_method["reverse_sweep"]
 
-        # Generate both positive and negative frames for flicker fusion
-        pos_frame, neg_frame, mask = self._inject_img(self.carrier_img, color_deltaE=self.color_deltaE)
+        # Generate both positive and negative frames
+        pos_frame, neg_frame, base_mask = self._inject_img(self.carrier_img)
 
-        # Generate OpenGL textures for both positive and negative frames
-        pos_tex, x0, y0, w, h = self._create_masked_texture(pos_frame, mask)
-        neg_tex, _, _, _, _ = self._create_masked_texture(neg_frame, mask)
+        # Precompute vibration textures (same structure as fixed flicker)
+        texture_sequence, _, _, _, _ = self._precompute_vibration_textures(
+            pos_frame, neg_frame, base_mask, None
+        )
 
-        frame_count = 0
-        start_time = time.perf_counter_ns()
+        num_vibration_frames = len(texture_sequence)
+        start_time = time.perf_counter()
+
         while not glfw.window_should_close(self.window):
             glClear(GL_COLOR_BUFFER_BIT)
-            t = (time.perf_counter_ns() - start_time) / 1e9
-            
-            # Break if we have gone over duration
-            if self.duration is not None and (t >= self.duration):
+
+            t = time.perf_counter() - start_time
+            if self.duration is not None and t >= self.duration:
                 break
-            
+
+            vib_phase = (t * self.vibration_config["freq"]) % 1.0
+            vib_index = int(vib_phase * num_vibration_frames) % num_vibration_frames
+            pos_tex, neg_tex = texture_sequence[vib_index]
+
+            # Sweep phase in [0, 1]
             phase = min((t % sweep_duration) / sweep_duration, 1.0)
+
             if reverse_sweep:
                 if phase > 0.5:
                     phase = 1.0 - (phase - 0.5) * 2
                 else:
                     phase = phase * 2
 
-            # Compute instantaneous frequency
+            # Instantaneous flicker frequency
             current_freq = start_freq + (end_freq - start_freq) * phase
             current_period = 1.0 / current_freq
-            local_phase = (t % current_period) / current_period
-            
-            tex_id = pos_tex if local_phase < 0.5 else neg_tex
-            self._draw_masked_region(tex_id, x0, y0, w, h)
 
+            # Phase within the LFM flicker cycle
+            local_phase = (t % current_period) / current_period
+
+            # Alternate based on local LFM flicker phase
+            tex_id = pos_tex if local_phase < 0.5 else neg_tex
+
+            self._draw_texture(tex_id)
 
             glfw.swap_buffers(self.window)
             glfw.poll_events()
 
-            frame_count += 1
-
-        glfw.terminate()
-
-        cv2.destroyAllWindows()
+        try:
+            for pos_tex, neg_tex in texture_sequence:
+                glDeleteTextures([pos_tex, neg_tex])
+            glfw.destroy_window(self.window)
+            glfw.terminate()
+        except Exception:
+            print("Failed to delete all textures")
+            sys.exit(1)
 
 
     def _contrast_injection(self) -> None:
@@ -812,7 +815,3 @@ class EventAttack:
             # Contrast injection: inject a black image and then attack image at certain duration
             case "contrast_injection":
                 self._contrast_injection()
-
-            # Video injection: translate an mp4 video into flicker pattern
-            case "video_injection":
-                self._video_injection()
