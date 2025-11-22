@@ -13,9 +13,7 @@ import matplotlib.pyplot as plt
 
 import glfw
 from OpenGL.GL import *
-
-from skimage.feature import graycomatrix, graycoprops
-from skimage.util.shape import view_as_windows
+from OpenGL.GL.shaders import compileShader, compileProgram
 
 class EventAttack:
     def __init__(self, attack_config_path : pathlib.Path):
@@ -46,6 +44,50 @@ class EventAttack:
         self.carrier_img = cv2.imread(self.attack_config["carrier_image"], cv2.IMREAD_UNCHANGED)
         self.inject_img = cv2.resize(self.inject_img, (self.monitor_W, self.monitor_H), interpolation=cv2.INTER_LINEAR)
         self.carrier_img = cv2.resize(self.carrier_img, (self.monitor_W, self.monitor_H), interpolation=cv2.INTER_LINEAR)
+
+        # Initialize fullscreen quad
+        self.vao = self._init_fullscreen_quad()
+
+        # Compile simple shader
+        self.vertex_src = """
+            #version 330 core
+            layout(location = 0) in vec2 in_pos;  // clip space [-1,1]
+            layout(location = 1) in vec2 in_uv;   // texture coords [0,1]
+
+            out vec2 frag_uv;
+
+            void main() {
+                frag_uv = in_uv;
+                gl_Position = vec4(in_pos, 0.0, 1.0);
+            }
+        """
+        self.frag_src = """
+            #version 330 core
+            in vec2 frag_uv;
+            out vec4 out_color;
+
+            uniform sampler2D tex;          // flicker texture
+            uniform sampler2D mask_tex;     // optional mask texture
+            uniform int use_mask;           // 1 = masked_region, 0 = fullscreen
+
+            void main() {
+                vec4 color = texture(tex, frag_uv);
+
+                if(use_mask == 1) {
+                    float alpha = texture(mask_tex, frag_uv).r; // mask in red channel
+                    color *= alpha;
+                }
+
+                out_color = color;
+            }
+        """
+        self.shader = compileProgram(
+            compileShader(self.vertex_src, GL_VERTEX_SHADER),
+            compileShader(self.frag_src, GL_FRAGMENT_SHADER)
+        )
+
+        # Store tex ID in one location
+        self.tex_uniform = glGetUniformLocation(self.shader, "tex")
 
     # Parse YAML config file
     def _parse_attack_config(self, config_path : pathlib.Path):
@@ -449,7 +491,7 @@ class EventAttack:
             glfw.terminate()
             raise RuntimeError("Failed to create GLFW window")
         glfw.make_context_current(window)
-        glfw.swap_interval(0)  # disable vsync
+        glfw.swap_interval(1)  # enable vsync
 
         # Projection to pixel coordinates
         glViewport(0, 0, self.monitor_W, self.monitor_H)
@@ -465,6 +507,34 @@ class EventAttack:
         glClearColor(0.0, 0.0, 0.0, 1.0)
 
         return window, self.monitor_W, self.monitor_H
+
+    def _init_fullscreen_quad(self):
+        quad_vertices = np.array([
+            # positions   # texcoords
+            -1.0, -1.0,   0.0, 0.0,  # bottom-left
+            1.0, -1.0,   1.0, 0.0,  # bottom-right
+            1.0,  1.0,   1.0, 1.0,  # top-right
+
+            -1.0, -1.0,   0.0, 0.0,  # bottom-left
+            1.0,  1.0,   1.0, 1.0,  # top-right
+            -1.0,  1.0,   0.0, 1.0,  # top-left
+        ], dtype=np.float32)
+
+        vao = glGenVertexArrays(1)
+        glBindVertexArray(vao)
+
+        vbo = glGenBuffers(1)
+        glBindBuffer(GL_ARRAY_BUFFER, vbo)
+        glBufferData(GL_ARRAY_BUFFER, quad_vertices.nbytes, quad_vertices, GL_STATIC_DRAW)
+
+        # positions
+        glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 4 * 4, ctypes.c_void_p(0))
+        glEnableVertexAttribArray(0)
+        # uvs
+        glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 4 * 4, ctypes.c_void_p(8))
+        glEnableVertexAttribArray(1)
+
+        return vao
 
     def _load_texture_from_array(self, img_array):
         # Convert BGR to RGBA
@@ -496,19 +566,17 @@ class EventAttack:
         tex_id, w, h = self._load_texture_from_array(rgba)
         return tex_id, x0, y0, w, h
 
-    def _draw_fullscreen_image(self, tex_id, W, H):
-        glEnable(GL_TEXTURE_2D)
+    def _draw_fullscreen_image(self, tex_id):
+        glClear(GL_COLOR_BUFFER_BIT)
+
+        glUseProgram(self.shader)
+
+        glActiveTexture(GL_TEXTURE0)
         glBindTexture(GL_TEXTURE_2D, tex_id)
-        glColor4f(1.0, 1.0, 1.0, 1.0)
+        glUniform1i(self.tex_uniform, 0)
 
-        glBegin(GL_QUADS)
-        glTexCoord2f(0, 0); glVertex2f(0, 0)
-        glTexCoord2f(1, 0); glVertex2f(W, 0)
-        glTexCoord2f(1, 1); glVertex2f(W, H)
-        glTexCoord2f(0, 1); glVertex2f(0, H)
-        glEnd()
-
-        glDisable(GL_TEXTURE_2D)
+        glBindVertexArray(self.vao)
+        glDrawArrays(GL_TRIANGLES, 0, 6)
 
     def _draw_masked_region(self, tex_id, x0, y0, w, h):
         glEnable(GL_TEXTURE_2D)
@@ -524,8 +592,18 @@ class EventAttack:
 
         glDisable(GL_TEXTURE_2D)
 
+    def _draw_texture(self, tex_id):
+        glClear(GL_COLOR_BUFFER_BIT)
+
+        glUseProgram(self.shader)
+        glActiveTexture(GL_TEXTURE0)
+        glBindTexture(GL_TEXTURE_2D, tex_id)
+        glUniform1i(self.tex_uniform, 0)
+
+        glBindVertexArray(self.vao)
+        glDrawArrays(GL_TRIANGLES, 0, 6)
     # Attack Functions
-    def _precompute_vibration_textures(self, pos_frame, neg_frame, mask, draw_pattern):
+    def _precompute_vibration_textures(self, pos_frame, neg_frame, mask):
         """
         Precompute textures for the entire vibration cycle.
         Returns list of tuples: (pos_tex_info, neg_tex_info) for each time step.
@@ -547,14 +625,8 @@ class EventAttack:
 
         # If no vibration, return single frame pair
         if vib_freq == 0 or vib_amp == 0:
-            if draw_pattern == "fullscreen":
-                pos_tex, w, h = self._load_texture_from_array(pos_frame)
-                neg_tex, _, _ = self._load_texture_from_array(neg_frame)
-                textures.append((pos_tex, neg_tex))
-            else:
-                pos_tex, x0, y0, w, h = self._create_masked_texture(pos_frame, mask)
-                neg_tex, _, _, _, _ = self._create_masked_texture(neg_frame, mask)
-
+            pos_tex, w, h = self._load_texture_from_array(pos_frame)
+            neg_tex, _, _ = self._load_texture_from_array(neg_frame)
             textures.append((pos_tex, neg_tex))
             return textures, x0, y0, w, h
 
@@ -567,78 +639,59 @@ class EventAttack:
             t = i / fps
             vib_mask = self._vibrate_mask(mask, t)
 
-            if draw_pattern == "fullscreen":
-                # Apply mask to create complete frames
-                pos_complete = _apply_mask_to_frame(pos_frame, vib_mask, self.carrier_img)
-                neg_complete = _apply_mask_to_frame(neg_frame, vib_mask, self.carrier_img)
+            # Apply mask to create complete frames
+            pos_complete = _apply_mask_to_frame(pos_frame, vib_mask, self.carrier_img)
+            neg_complete = _apply_mask_to_frame(neg_frame, vib_mask, self.carrier_img)
             
-                pos_full_tex, w, h = self._load_texture_from_array(pos_complete)
-                neg_full_tex, _, _ = self._load_texture_from_array(neg_complete)
-                textures.append((pos_full_tex, neg_full_tex))
-
-            elif draw_pattern == "masked_region":
-                pos_masked_tex, x0, y0, w, h = self._create_masked_texture(pos_frame, vib_mask)
-                neg_masked_tex, _, _, _, _ = self._create_masked_texture(neg_frame, vib_mask)
-                textures.append((pos_masked_tex, neg_masked_tex))
+            pos_full_tex, w, h = self._load_texture_from_array(pos_complete)
+            neg_full_tex, _, _ = self._load_texture_from_array(neg_complete)
+            textures.append((pos_full_tex, neg_full_tex))
 
         return textures, x0, y0, w, h
 
     def _fixed_flicker(self) -> None:
-        # Extract drawing method
-        drawing_method = self.injection_config["drawing_method"]
-
-        # Extract fixed-flicker specific variables
         fps = self.attack_method["fps"]
 
-        # Generate both positive and negative frames for flicker fusion
+        # Generate both positive and negative frames
         pos_frame, neg_frame, base_mask = self._inject_img(self.carrier_img)
 
-        # Precompute complete vibrating frames
-        texture_sequence, x0, y0, _, _ = self._precompute_vibration_textures(pos_frame, neg_frame, base_mask, drawing_method)
+        # Precompute textures for vibration cycle
+        texture_sequence, x0, y0, w, h = self._precompute_vibration_textures(
+            pos_frame, neg_frame, base_mask
+        )
 
         num_vibration_frames = len(texture_sequence)
-        start_time = time.perf_counter_ns()
+        start_time = time.perf_counter()
+
         while not glfw.window_should_close(self.window):
-            t0 = time.perf_counter_ns()
             glClear(GL_COLOR_BUFFER_BIT)
-            t = (time.perf_counter_ns() - start_time) / 1e9
-            
-            # Break if we have gone over duration
-            if self.duration is not None and (t >= self.duration):
+
+            t = time.perf_counter() - start_time
+            if self.duration is not None and t >= self.duration:
                 break
-            
-            # Get the current vibration frame
+
+            # Determine current vibration frame index
             vib_phase = (t * self.vibration_config["freq"]) % 1.0
             vib_index = int(vib_phase * num_vibration_frames) % num_vibration_frames
-            pos_full_tex, neg_full_tex = texture_sequence[vib_index]
-            
+            pos_tex, neg_tex = texture_sequence[vib_index]
+
+            # Alternate between positive and negative frames
             phase = int(t * fps) % 2
+            tex_id = pos_tex if phase == 0 else neg_tex
 
-            # Flash between positive and negative complete frames
-            tex_id = pos_full_tex if phase == 0 else neg_full_tex
-
-            match drawing_method:
-                case "fullscreen":
-                    self._draw_fullscreen_image(tex_id, self.monitor_W, self.monitor_H)
-            
-                case "masked_region":
-                    self._draw_masked_region(tex_id, x0, y0, self.monitor_W, self.monitor_H)
+            self._draw_texture(tex_id)
 
             glfw.swap_buffers(self.window)
             glfw.poll_events()
-            t1 = time.perf_counter_ns()
-            print(f"Approximate FPS: {1.0 / (float(t1 - t0) / 1e9)}")
 
-        # Cleanup
+        # Cleanup textures
         try:
-            glfw.destroy_window(self.window)
-            glfw.terminate()
             for pos_tex, neg_tex in texture_sequence:
                 glDeleteTextures([pos_tex, neg_tex])
+            glfw.destroy_window(self.window)
+            glfw.terminate()
         except Exception:
             pass
-
-        glfw.terminate()
 
     def _lfm_flicker(self) -> None:
         # Extract LFM-specific parameters
@@ -743,56 +796,7 @@ class EventAttack:
             glfw.poll_events()
 
         glfw.terminate()
-
-    def _vid_reader(self, frame_queue, original_video_path):
-        vid = cv2.VideoCapture(original_video_path)
-
-        while True:
-            ret, frame = vid.read()
-            if not ret:
-                print("Finished reading video. Killing thread.")
-                break
-    
-            if frame_queue.full():
-                frame_queue.get()
-
-            # Obtain positive and negative injected images
-            pos_frame, neg_frame, mask = self._inject_img(frame, color_deltaE=self.color_deltaE)
-
-            # Generate OpenGL textures for our altered frames
-            pos_info = self._create_masked_texture(pos_frame, mask)
-            neg_info = self._create_masked_texture(neg_frame, mask)
-                
-            # Put both the positive and negative frames on the queue alongside drawing regions
-            frame_queue.put(pos_info)
-            frame_queue.put(neg_info)
-
-        vid.release()
-        frame_queue.put(None)
-
-
-    def _display_writer(self, frame_queue):
-        prev_tex_id = None
-        while True:
-            curr_tex_id, x0, y0, w, h = frame_queue.get()
-            self._draw_masked_region(curr_tex_id, x0, y0, w, h)
-            prev_tex_id = curr_tex_id
-
-    def _video_injection(self) -> None:
-        # Extract video-injection specific variables
-
-        vid = cv2.VideoCapture()
-        while True:
-            ret, frame = vid.read()
-            if not ret:
-                break
-
-            # Obtain positive and negative injected images
-            pos_frame, neg_frame, mask = self._inject_img(frame, color_deltaE=self.color_deltaE)
-
-            # Generate OpenGL textures for our altered frames
-            pos_info = self._create_masked_texture(pos_frame, mask)
-            neg_info = self._create_masked_texture(neg_frame, mask)            
+          
 
     def flicker(self) -> None:
         # Determine which attack method we should use
