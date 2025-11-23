@@ -387,8 +387,8 @@ class EventAttack:
         neg_carrier_lab = np.clip(neg_carrier_lab, 0, 255).astype(np.uint8)
 
         # Convert both images back to RGB space
-        pos_carrier = cv2.cvtColor(pos_carrier_lab, cv2.COLOR_LAB2RGB)
-        neg_carrier = cv2.cvtColor(neg_carrier_lab, cv2.COLOR_LAB2RGB)
+        pos_carrier = cv2.cvtColor(pos_carrier_lab, cv2.COLOR_LAB2BGR)
+        neg_carrier = cv2.cvtColor(neg_carrier_lab, cv2.COLOR_LAB2BGR)
 
         return pos_carrier, neg_carrier, total_mask
     
@@ -592,6 +592,69 @@ class EventAttack:
         glBindVertexArray(self.vao)
         glDrawArrays(GL_TRIANGLES, 0, 6)
 
+    # Plotting functions
+    def _plot_contrast(self, contrast_times, contrast_vals, fs) -> None:
+        import matplotlib.pyplot as plt
+        import numpy as np
+        from scipy.fft import fft, fftfreq
+
+        # Convert to arrays
+        contrast_times = np.array(contrast_times)
+        contrast_vals = np.array(contrast_vals)
+
+        # compute dt based on sampling frequency
+        dt = 1 / fs
+
+        # Compute FFT
+        N = len(contrast_vals)
+        fft_vals = fft(contrast_vals - np.mean(contrast_vals))  # remove DC
+        fft_freqs = fftfreq(N, dt)
+
+        # Keep only positive frequencies
+        pos_mask = fft_freqs >= 0
+        fft_vals = np.abs(fft_vals[pos_mask])
+        fft_freqs = fft_freqs[pos_mask]
+
+        # Create figure with two subplots
+        fig, axs = plt.subplots(2, 1, figsize=(12, 8), sharex=False)
+
+        # Top: time domain
+        axs[0].plot(contrast_times, contrast_vals, color='blue')
+        axs[0].set_xlabel("Time (s)")
+        axs[0].set_ylabel("Contrast Amplitude (L units)")
+        axs[0].set_title("Display Flicker Amplitude during Attack (Time Domain)")
+        axs[0].grid(True)
+
+        # Bottom: frequency domain
+        axs[1].plot(fft_freqs, fft_vals, color='red')
+        axs[1].set_xlabel("Frequency (Hz)")
+        axs[1].set_ylabel("Amplitude")
+        axs[1].set_title("Display Flicker Amplitude Spectrum (Frequency Domain)")
+        axs[1].set_xlim(0, 120)  # Nyquist
+        axs[1].grid(True)
+
+        plt.tight_layout()
+        plt.show()
+
+    # Sampler functions
+    def _start_sampler(self, fs):
+        self._sample_times = []
+        self._sample_vals = []
+        self._sampling = True
+
+        def sampler():
+            dt = 1.0 / fs
+            t0 = time.perf_counter()
+            while self._sampling:
+                t = time.perf_counter() - t0
+                self._sample_times.append(t)
+                self._sample_vals.append(self._read_display_intensity())
+                time.sleep(dt)
+
+        self._sampler_thread = threading.Thread(target=sampler)
+        self._sampler_thread.daemon = True
+        self._sampler_thread.start()
+
     # Attack Functions
     def _precompute_vibration_textures(self, pos_frame, neg_frame, mask, fps):
         """
@@ -652,6 +715,42 @@ class EventAttack:
 
         num_vibration_frames = len(texture_sequence)
         start_time = time.perf_counter()
+        
+        # Define a capture signal for measuring contrast over time
+        fs = 1000 # Sample signal at 1kHz
+        contrast_times = []
+        contrast_vals = []
+
+        # Define negative and positive mean LAB values
+        pos_lab_val = cv2.cvtColor(pos_frame, cv2.COLOR_BGR2LAB)[base_mask].mean() - cv2.cvtColor(self.carrier_img, cv2.COLOR_BGR2LAB)[base_mask].mean()
+        neg_lab_val = cv2.cvtColor(neg_frame, cv2.COLOR_BGR2LAB)[base_mask].mean() - cv2.cvtColor(self.carrier_img, cv2.COLOR_BGR2LAB)[base_mask].mean()
+
+        def sample_intensity():
+            dt = 1.0 / fs
+            next_t = time.perf_counter()
+            start = next_t
+
+            while self._sampling_active:
+                now = time.perf_counter()
+                t = now - start
+
+                # Determine what frame SHOULD be on screen
+                phase = int(t * fps) % 2
+                intended_val = pos_lab_val if phase == 0 else neg_lab_val
+
+                contrast_times.append(t)
+                contrast_vals.append(intended_val)
+
+                # Sleep precisely to maintain 1kHz
+                next_t += dt
+                sleep_time = next_t - time.perf_counter()
+                if sleep_time > 0:
+                    time.sleep(sleep_time)
+
+        # === Start sampling thread ===
+        self._sampling_active = True
+        sampler_thread = threading.Thread(target=sample_intensity, daemon=True)
+        sampler_thread.start()
 
         while not glfw.window_should_close(self.window):
             glClear(GL_COLOR_BUFFER_BIT)
@@ -671,8 +770,16 @@ class EventAttack:
 
             self._draw_texture(tex_id)
 
+            # Record time and frame contrast
+            #frame_mask_intensity = pos_lab_val if phase == 0 else neg_lab_val
+            #contrast_times.append(t)
+            #contrast_vals.append(frame_mask_intensity)
+
             glfw.swap_buffers(self.window)
             glfw.poll_events()
+
+        self._sampling_active = False
+        sampler_thread.join()
 
         # Cleanup textures
         try:
@@ -683,6 +790,9 @@ class EventAttack:
         except Exception:
             print("Failed to delete all textures")
             sys.exit(1)
+
+        print(f"Number of points: {len(contrast_times)}")
+        self._plot_contrast(contrast_times, contrast_vals, fs)
 
     def _lfm_flicker(self) -> None:
         start_freq = self.attack_method["start_freq"]
