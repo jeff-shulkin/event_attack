@@ -1,5 +1,5 @@
-carrier_image: C:/Users/Jeff/Pictures/watch_ad2.jpg
-injected_image: C:/Users/Jeff/Documents/Research/event_attack/injection_photos/hidden_images/stopsign.png # Path to injected/attack image
+carrier_image: C:/Users/jshul/OneDrive/Pictures/watch_ad2.jpg
+injected_image: C:/Users/jshul/OneDrive/Pictures/stopsign.png # Path to injected/attack image
 
 duration: 20.0 # Units: seconds
 
@@ -25,7 +25,7 @@ monitor_id: 0 # Monitor choice (primary or secondary)
 
 attack_method:
   type: lfm # Choices: [fixed, lfm, contrast_injection]
-  start_freq: 60.0 # Units: Hz
-  end_freq: 165.0 # Units: Hz
-  sweep_duration: 0.5 # Units: seconds
-  reverse_sweep: True # Units: boolean (True/False)
+  start_freq: 50.0 # Units: Hz
+  end_freq: 100.0 # Units: Hz
+  sweep_duration: 10 # Units: seconds
+  reverse_sweep: False # Units: boolean (True/False)

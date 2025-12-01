@@ -6,6 +6,7 @@ import sys
 
 import numpy as np
 import scipy as sp
+from scipy.fft import fft, fftfreq
 import cv2
 import yaml
 from yaml.loader import FullLoader
@@ -397,9 +398,6 @@ class EventAttack:
         carrier_intensity = self._log_intensity(carrier_img, eps=1e-6, use_natural_log=True)
         inject_intensity = self._log_intensity(self.inject_img, eps=1e-6, use_natural_log=True)
 
-        print(f"Max carrier intensity: {np.max(carrier_intensity)}")
-        print(f"Max injected intensity: {np.max(inject_intensity)}")
-
         # Create injection mask
         injection_mask = self._create_injection_mask(self.inject_img)
 
@@ -422,7 +420,6 @@ class EventAttack:
 
         # Compute logI delta
         delta_logI = np.log10(1.0 + contrast)
-        print(f"delta_logI: {delta_logI}")
         
         # Vibrating mask:
         total_mask = self._vibrate_mask(mask=translated_mask, t=t)
@@ -494,7 +491,7 @@ class EventAttack:
             glfw.terminate()
             raise RuntimeError("Failed to create GLFW window")
         glfw.make_context_current(window)
-        glfw.swap_interval(1)  # enable vsync
+        glfw.swap_interval(0)  # enable vsync
 
         # Projection to pixel coordinates
         glViewport(0, 0, self.monitor_W, self.monitor_H)
@@ -594,10 +591,6 @@ class EventAttack:
 
     # Plotting functions
     def _plot_contrast(self, contrast_times, contrast_vals, fs) -> None:
-        import matplotlib.pyplot as plt
-        import numpy as np
-        from scipy.fft import fft, fftfreq
-
         # Convert to arrays
         contrast_times = np.array(contrast_times)
         contrast_vals = np.array(contrast_vals)
@@ -615,8 +608,8 @@ class EventAttack:
         fft_vals = np.abs(fft_vals[pos_mask])
         fft_freqs = fft_freqs[pos_mask]
 
-        # Create figure with two subplots
-        fig, axs = plt.subplots(2, 1, figsize=(12, 8), sharex=False)
+        # Create figure with three subplots
+        fig, axs = plt.subplots(3, 1, figsize=(12, 8), sharex=False)
 
         # Top: time domain
         axs[0].plot(contrast_times, contrast_vals, color='blue')
@@ -625,35 +618,64 @@ class EventAttack:
         axs[0].set_title("Display Flicker Amplitude during Attack (Time Domain)")
         axs[0].grid(True)
 
-        # Bottom: frequency domain
+        # Middle: frequency domain
         axs[1].plot(fft_freqs, fft_vals, color='red')
         axs[1].set_xlabel("Frequency (Hz)")
         axs[1].set_ylabel("Amplitude")
         axs[1].set_title("Display Flicker Amplitude Spectrum (Frequency Domain)")
-        axs[1].set_xlim(0, 120)  # Nyquist
+        axs[1].set_xlim(0, fs / 2)  # Nyquist
         axs[1].grid(True)
+
+        # Bottom: spectrogram
+        f, tt, Sxx = sp.signal.spectrogram(
+            contrast_vals,
+            fs=fs,
+            nperseg=1024,
+            noverlap=900,
+            window='hann',
+            scaling='density',
+            mode='magnitude'
+        )
+
+        # Compute power for -150, 150 Hz range
+        freq_limit = 120
+        range = f <= freq_limit
+        f_disp = f[range]
+        Sxx_disp = Sxx[range]
+        Sxx_db = 10 * np.log10(np.abs(Sxx_disp + 1e-12))
+
+        pcm = axs[2].pcolormesh(tt, f_disp, Sxx_db, shading='auto', cmap='jet')
+        plt.colorbar(pcm, ax=axs[2], label='Power (dB)')
+        axs[2].set_xlabel("TIme (s)")
+        axs[2].set_ylabel("Frequency (Hz)")
+        axs[2].set_title("Display Waveform Spectrogram")
+        axs[2].set_xlim(0, 20)
+        axs[2].grid(True)
 
         plt.tight_layout()
         plt.show()
 
     # Sampler functions
-    def _start_sampler(self, fs):
-        self._sample_times = []
-        self._sample_vals = []
-        self._sampling = True
+    def _sample(self, fs=1000):
+        next_t = time.perf_counter()
+        t0 = next_t
+        dt = 1 / fs
 
-        def sampler():
-            dt = 1.0 / fs
-            t0 = time.perf_counter()
-            while self._sampling:
-                t = time.perf_counter() - t0
-                self._sample_times.append(t)
-                self._sample_vals.append(self._read_display_intensity())
-                time.sleep(dt)
+        while self._sampling_active:
+            now = time.perf_counter()
+            t = now - t0
 
-        self._sampler_thread = threading.Thread(target=sampler)
-        self._sampler_thread.daemon = True
-        self._sampler_thread.start()
+            # --- READ CURRENT FRAME BEING DISPLAYED ---
+            tex_id = self.current_tex_id
+            val = self.current_val
+
+            self.contrast_times.append(t)
+            self.contrast_vals.append(val)
+
+            next_t += dt
+            sleep_time = next_t - time.perf_counter()
+            if sleep_time > 0:
+                time.sleep(sleep_time)
 
     # Attack Functions
     def _precompute_vibration_textures(self, pos_frame, neg_frame, mask, fps):
@@ -680,9 +702,11 @@ class EventAttack:
         if vib_freq == 0 or vib_amp == 0:
             pos_tex, w, h = self._load_texture_from_array(pos_frame)
             neg_tex, _, _ = self._load_texture_from_array(neg_frame)
-            textures.append((pos_tex, neg_tex))
-            return textures, x0, y0, w, h
-
+            pos_val = float(cv2.cvtColor(pos_frame, cv2.COLOR_BGR2LAB)[mask].mean() - cv2.cvtColor(self.carrier_img, cv2.COLOR_BGR2LAB)[mask].mean())
+            neg_val = float(cv2.cvtColor(neg_frame, cv2.COLOR_BGR2LAB)[mask].mean() - cv2.cvtColor(self.carrier_img, cv2.COLOR_BGR2LAB)[mask].mean())
+            textures.append((pos_tex, pos_val, neg_tex, neg_val))
+            return textures
+        
         # Compute number of frames per vibration period
         period = 1.0 / vib_freq
         num_frames = int(np.ceil(period * fps))
@@ -696,12 +720,12 @@ class EventAttack:
             pos_complete = _apply_mask_to_frame(pos_frame, vib_mask, self.carrier_img)
             neg_complete = _apply_mask_to_frame(neg_frame, vib_mask, self.carrier_img)
             
-            pos_full_tex, w, h = self._load_texture_from_array(pos_complete)
+            pos_full_tex, _, _ = self._load_texture_from_array(pos_complete)
             neg_full_tex, _, _ = self._load_texture_from_array(neg_complete)
             textures.append((pos_full_tex, neg_full_tex))
 
-        return textures, x0, y0, w, h
-
+        return textures
+    
     def _fixed_flicker(self) -> None:
         fps = self.attack_method["fps"]
 
@@ -709,47 +733,29 @@ class EventAttack:
         pos_frame, neg_frame, base_mask = self._inject_img(self.carrier_img)
 
         # Precompute textures for vibration cycle
-        texture_sequence, _, _, _, _ = self._precompute_vibration_textures(
+        texture_sequence = self._precompute_vibration_textures(
             pos_frame, neg_frame, base_mask, fps
         )
 
-        num_vibration_frames = len(texture_sequence)
-        start_time = time.perf_counter()
-        
+        self.texture_value_map = {}
+        for pos_tex, pos_val, neg_tex, neg_val in texture_sequence:
+            self.texture_value_map[pos_tex] = pos_val
+            self.texture_value_map[neg_tex] = neg_val
+
         # Define a capture signal for measuring contrast over time
         fs = 1000 # Sample signal at 1kHz
-        contrast_times = []
-        contrast_vals = []
+        self.contrast_times = []
+        self.contrast_vals = []
 
-        # Define negative and positive mean LAB values
-        pos_lab_val = cv2.cvtColor(pos_frame, cv2.COLOR_BGR2LAB)[base_mask].mean() - cv2.cvtColor(self.carrier_img, cv2.COLOR_BGR2LAB)[base_mask].mean()
-        neg_lab_val = cv2.cvtColor(neg_frame, cv2.COLOR_BGR2LAB)[base_mask].mean() - cv2.cvtColor(self.carrier_img, cv2.COLOR_BGR2LAB)[base_mask].mean()
+        self.current_tex_id = texture_sequence[0][0]  # use first pos_tex
+        self.current_val = self.texture_value_map[self.current_tex_id]
 
-        def sample_intensity():
-            dt = 1.0 / fs
-            next_t = time.perf_counter()
-            start = next_t
-
-            while self._sampling_active:
-                now = time.perf_counter()
-                t = now - start
-
-                # Determine what frame SHOULD be on screen
-                phase = int(t * fps) % 2
-                intended_val = pos_lab_val if phase == 0 else neg_lab_val
-
-                contrast_times.append(t)
-                contrast_vals.append(intended_val)
-
-                # Sleep precisely to maintain 1kHz
-                next_t += dt
-                sleep_time = next_t - time.perf_counter()
-                if sleep_time > 0:
-                    time.sleep(sleep_time)
+        num_vibration_frames = len(texture_sequence)
+        start_time = time.perf_counter()
 
         # === Start sampling thread ===
         self._sampling_active = True
-        sampler_thread = threading.Thread(target=sample_intensity, daemon=True)
+        sampler_thread = threading.Thread(target=self._sample, args=(fs,), daemon=True)
         sampler_thread.start()
 
         while not glfw.window_should_close(self.window):
@@ -762,18 +768,14 @@ class EventAttack:
             # Determine current vibration frame index
             vib_phase = (t * self.vibration_config["freq"]) % 1.0
             vib_index = int(vib_phase * num_vibration_frames) % num_vibration_frames
-            pos_tex, neg_tex = texture_sequence[vib_index]
+            pos_tex, pos_val, neg_tex, neg_val = texture_sequence[vib_index]
 
             # Alternate between positive and negative frames
             phase = int(t * fps) % 2
-            tex_id = pos_tex if phase == 0 else neg_tex
-
-            self._draw_texture(tex_id)
-
-            # Record time and frame contrast
-            #frame_mask_intensity = pos_lab_val if phase == 0 else neg_lab_val
-            #contrast_times.append(t)
-            #contrast_vals.append(frame_mask_intensity)
+            self.current_tex_id = pos_tex if phase == 0 else neg_tex
+            self.current_val = self.texture_value_map[self.current_tex_id]
+            
+            self._draw_texture(self.current_tex_id)
 
             glfw.swap_buffers(self.window)
             glfw.poll_events()
@@ -783,7 +785,7 @@ class EventAttack:
 
         # Cleanup textures
         try:
-            for pos_tex, neg_tex in texture_sequence:
+            for pos_tex, _, neg_tex, _ in texture_sequence:
                 glDeleteTextures([pos_tex, neg_tex])
             glfw.destroy_window(self.window)
             glfw.terminate()
@@ -791,8 +793,9 @@ class EventAttack:
             print("Failed to delete all textures")
             sys.exit(1)
 
-        print(f"Number of points: {len(contrast_times)}")
-        self._plot_contrast(contrast_times, contrast_vals, fs)
+        print(f"Number of points: {len(self.contrast_times)}")
+        self._plot_contrast(self.contrast_times, self.contrast_vals, fs)
+
 
     def _lfm_flicker(self) -> None:
         start_freq = self.attack_method["start_freq"]
@@ -803,10 +806,28 @@ class EventAttack:
         # Generate both positive and negative frames
         pos_frame, neg_frame, base_mask = self._inject_img(self.carrier_img)
 
-        # Precompute vibration textures (same structure as fixed flicker)
-        texture_sequence, _, _, _, _ = self._precompute_vibration_textures(
-            pos_frame, neg_frame, base_mask, None
+        # Precompute textures for vibration cycle
+        texture_sequence = self._precompute_vibration_textures(
+            pos_frame, neg_frame, base_mask, self.monitor_fps
         )
+
+        self.texture_value_map = {}
+        for pos_tex, pos_val, neg_tex, neg_val in texture_sequence:
+            self.texture_value_map[pos_tex] = pos_val
+            self.texture_value_map[neg_tex] = neg_val
+
+        # Define a capture signal for measuring contrast over time
+        fs = 1000 # Sample signal at 1kHz
+        self.contrast_times = []
+        self.contrast_vals = []
+
+        self.current_tex_id = texture_sequence[0][0]  # use first pos_tex
+        self.current_val = self.texture_value_map[self.current_tex_id]
+
+        # === Start sampling thread ===
+        self._sampling_active = True
+        sampler_thread = threading.Thread(target=self._sample, args=(fs,), daemon=True)
+        sampler_thread.start()
 
         num_vibration_frames = len(texture_sequence)
         start_time = time.perf_counter()
@@ -815,39 +836,34 @@ class EventAttack:
             glClear(GL_COLOR_BUFFER_BIT)
 
             t = time.perf_counter() - start_time
-            if self.duration is not None and t >= self.duration:
+            if t >= self.duration:
                 break
 
             vib_phase = (t * self.vibration_config["freq"]) % 1.0
             vib_index = int(vib_phase * num_vibration_frames) % num_vibration_frames
-            pos_tex, neg_tex = texture_sequence[vib_index]
+            pos_tex, _, neg_tex, _ = texture_sequence[vib_index]
 
-            # Sweep phase in [0, 1]
-            phase = min((t % sweep_duration) / sweep_duration, 1.0)
+            # Sweep progress
+            sweep_phase = (t / sweep_duration) % 1.0
 
             if reverse_sweep:
-                if phase > 0.5:
-                    phase = 1.0 - (phase - 0.5) * 2
-                else:
-                    phase = phase * 2
+                sweep_phase = 1.0 - sweep_phase
 
-            # Instantaneous flicker frequency
-            current_freq = start_freq + (end_freq - start_freq) * phase
-            current_period = 1.0 / current_freq
+            t_mod = t % sweep_duration
+            phi = 2 * np.pi * (start_freq * t_mod + 0.5 * (end_freq - start_freq) * t_mod**2 / sweep_duration)
+            local_phase = (phi / (2*np.pi)) % 1.0
 
-            # Phase within the LFM flicker cycle
-            local_phase = (t % current_period) / current_period
+            # Pick pos/neg frame
+            self.current_tex_id = pos_tex if local_phase < 0.5 else neg_tex
+            self.current_val = self.texture_value_map[self.current_tex_id]
 
-            # Alternate based on local LFM flicker phase
-            tex_id = pos_tex if local_phase < 0.5 else neg_tex
-
-            self._draw_texture(tex_id)
+            self._draw_texture(self.current_tex_id)
 
             glfw.swap_buffers(self.window)
             glfw.poll_events()
 
         try:
-            for pos_tex, neg_tex in texture_sequence:
+            for pos_tex, _, neg_tex, _ in texture_sequence:
                 glDeleteTextures([pos_tex, neg_tex])
             glfw.destroy_window(self.window)
             glfw.terminate()
@@ -855,6 +871,114 @@ class EventAttack:
             print("Failed to delete all textures")
             sys.exit(1)
 
+        self._plot_contrast(self.contrast_times, self.contrast_vals, fs)
+
+    # def _lfm_flicker(self) -> None:
+    #     # Configuration parameters
+    #     start_freq = self.attack_method["start_freq"]
+    #     end_freq = self.attack_method["end_freq"]
+    #     sweep_duration = self.attack_method["sweep_duration"]
+    #     reverse_sweep = self.attack_method["reverse_sweep"]
+
+    #     # 1. Setup (Image Injection and Texture Precomputation)
+    #     pos_frame, neg_frame, base_mask = self._inject_img(self.carrier_img)
+    #     texture_sequence = self._precompute_vibration_textures(
+    #         pos_frame, neg_frame, base_mask, self.monitor_fps
+    #     )
+    #     self.texture_value_map = {}
+    #     for pos_tex, pos_val, neg_tex, neg_val in texture_sequence:
+    #         self.texture_value_map[pos_tex] = pos_val
+    #         self.texture_value_map[neg_tex] = neg_val
+
+    #     # Setup sampling and threading
+    #     fs = 1000 # Sample signal at 1kHz
+    #     self.contrast_times = []
+    #     self.contrast_vals = []
+    #     self.current_tex_id = texture_sequence[0][0]
+    #     self.current_val = self.texture_value_map[self.current_tex_id]
+            
+    #     self._sampling_active = True
+    #     sampler_thread = threading.Thread(target=self._sample, args=(fs,), daemon=True)
+    #     sampler_thread.start()
+
+    #     # 2. Timing and Sweep Initialization
+    #     num_vibration_frames = len(texture_sequence)
+            
+    #     # --- CRITICAL FIX: Use discrete frame time ---
+    #     dt_frame = 1.0 / self.monitor_fps      # Time interval per frame
+    #     t0 = time.perf_counter()              # Store initial real time for duration check
+    #     frame_count = 0                       # Discrete frame counter
+    #     flicker_phase_integral = 0.0          # Phase integral for LFM flicker
+            
+    #     # Calculate Sweep Rate (slope of the frequency change)
+    #     sweep_rate = (end_freq - start_freq) / sweep_duration
+
+    #     while not glfw.window_should_close(self.window):
+    #         # Check duration limit using real time
+    #         t_real = time.perf_counter() - t0
+    #         if t_real >= self.duration:
+    #             break
+                
+    #         # **1. Calculate Time from Frame Count**
+    #         # This 't' is our precise, discrete time base
+    #         t = frame_count * dt_frame
+
+    #         # **2. Update LFM Flicker Frequency**
+    #         t_sweep_cycle = t % sweep_duration
+                
+    #         if reverse_sweep:
+    #             # If reverse sweep, use time relative to sweep end for phase
+    #             # We calculate the current frequency based on the linear change.
+    #             freq_instant = start_freq + sweep_rate * t_sweep_cycle
+                
+    #         else: # Standard sweep (low to high)
+    #             freq_instant = start_freq + sweep_rate * t_sweep_cycle
+                
+    #         # **3. Update Flicker Phase (Integration)**
+    #         # Phase is the integral of instantaneous frequency: d(phase)/dt = f(t)
+    #         # Discrete update: phase(t+dt) = phase(t) + f(t) * dt
+    #         flicker_phase_integral += freq_instant * dt_frame
+    #         flicker_phase_integral %= 1.0
+
+    #         # Determine frame index: 0 for Positive, 1 for Negative
+    #         # The flicker is a square wave, determined by which half of the phase cycle is active
+    #         flicker_state = int(flicker_phase_integral * 2) % 2 
+
+    #         # **4. Update Vibration (using same discrete time 't')**
+    #         vib_phase = (t * self.vibration_config["freq"]) % 1.0
+    #         vib_index = int(vib_phase * num_vibration_frames) % num_vibration_frames
+    #         pos_tex, _, neg_tex, _ = texture_sequence[vib_index]
+                
+    #         # **5. Draw Frame**
+    #         self.current_tex_id = pos_tex if flicker_state == 0 else neg_tex
+    #         self.current_val = self.texture_value_map[self.current_tex_id]
+                
+    #         self._draw_texture(self.current_tex_id)
+
+    #         # This waits for VSync, forcing the render time to be synchronized
+    #         glfw.swap_buffers(self.window)
+    #         glfw.poll_events()
+                
+    #         # Increment the frame counter after the frame has been displayed
+    #         frame_count += 1 
+
+    #     # Cleanup
+    #     self._sampling_active = False
+    #     sampler_thread.join()
+            
+    #     try:
+    #         # ... (texture and window cleanup)
+    #         for pos_tex, _, neg_tex, _ in texture_sequence: # Note: texture_sequence is tuple of (pos_tex, neg_tex) if no vibration pre-computation
+    #             glDeleteTextures([pos_tex, neg_tex])
+    #         glfw.destroy_window(self.window)
+    #         glfw.terminate()
+    #     except Exception:
+    #         print("Failed to delete all textures")
+    #         sys.exit(1)
+
+    #     print(f"Number of points: {len(self.contrast_times)}")
+    #     self._plot_contrast(self.contrast_times, self.contrast_vals, fs)
+            
 
     def _contrast_injection(self) -> None:
         # Extract Contrast Injection-specifc parameters
@@ -910,7 +1034,6 @@ class EventAttack:
 
         glfw.terminate()
           
-
     def flicker(self) -> None:
         # Determine which attack method we should use
         match self.attack_method["type"]:

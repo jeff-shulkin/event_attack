@@ -1,14 +1,13 @@
-carrier_image: C:/Users/Jeff/Pictures/watch_ad2.jpg
-injected_image: C:/Users/Jeff/Documents/Research/event_attack/injection_photos/hidden_images/stopsign.png # Path to injected/attack image
-
+carrier_image: C:/Users/jshul/OneDrive/Pictures/watch_ad2.jpg
+#injected_image: C:/Users/jshul/OneDrive/Pictures/stopsign.png # Path to injected/attack image
+injected_image: C:/Users/jshul/OneDrive/Pictures/black_sphere.jpg
 duration: 20.0 # Units: seconds
 
 # Injection Type:
 injection_config:
   injection_type: "lab" # Choices: [log, lab]
-  color_deltaE: 15.0 # Units: L space difference
+  color_deltaE: 10.0 # Units: L space difference
   mask_pattern: "full" # Choices: [full, edges]
-  drawing_method: "masked_region" # Choices: [fullscreen, masked_region]
 
 #injection_config:
 #  injection_type: "log"
@@ -25,8 +24,8 @@ vibration_config:
   freq: 0 # Units: Hz
   angle: 0 # Units: degrees
 
-monitor_id: 1 # Monitor choice (primary or secondary)
+monitor_id: 0 # Monitor choice (primary or secondary)
 
 attack_method: # Choices: [fixed, lfm, contrast_injection]
   type: fixed
-  fps: 30.0 # Units: Hz
+  fps: 165.0 # Units: Hz
